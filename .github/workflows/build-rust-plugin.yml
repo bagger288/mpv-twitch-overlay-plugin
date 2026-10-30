@@ -1,0 +1,86 @@
+name: Build Twitch Chat mpv Rust Plugin (Windows x64)
+
+on:
+  push:
+    branches: [ main, master ]
+    paths:
+      - 'twitch_records/rust_plugin/**'
+      - '.github/workflows/build-rust-plugin.yml'
+  pull_request:
+    paths:
+      - 'twitch_records/rust_plugin/**'
+      - '.github/workflows/build-rust-plugin.yml'
+  workflow_dispatch:
+    inputs:
+      build_profile:
+        description: 'Build profile'
+        required: true
+        default: 'release'
+        type: choice
+        options:
+          - release
+          - debug
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-windows:
+    name: Build twitch_chat.dll (Windows MSVC x64)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache Cargo Dependencies & Build Artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            twitch_records/rust_plugin -> target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('twitch_records/rust_plugin/Cargo.toml') }}
+
+      - name: Check Code Syntax & Types
+        run: |
+          cd twitch_records/rust_plugin
+          cargo check --verbose
+
+      - name: Build Rust Plugin (Release)
+        if: "${{ github.event.inputs.build_profile != 'debug' }}"
+        run: |
+          cd twitch_records/rust_plugin
+          cargo build --release --verbose
+
+      - name: Build Rust Plugin (Debug)
+        if: "${{ github.event.inputs.build_profile == 'debug' }}"
+        run: |
+          cd twitch_records/rust_plugin
+          cargo build --verbose
+
+      - name: Verify DLL Generation
+        shell: bash
+        run: |
+          PROFILE="${{ github.event.inputs.build_profile || 'release' }}"
+          DLL_PATH="twitch_records/rust_plugin/target/${PROFILE}/twitch_chat.dll"
+          if [ -f "$DLL_PATH" ]; then
+            echo "DLL build succeeded: $DLL_PATH"
+            ls -lh "$DLL_PATH"
+          else
+            echo "Error: DLL was not found at $DLL_PATH"
+            exit 1
+          fi
+
+      - name: Upload twitch_chat.dll Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: twitch_chat-windows-x64
+          path: |
+            twitch_records/rust_plugin/target/${{ github.event.inputs.build_profile || 'release' }}/twitch_chat.dll
+            twitch_records/rust_plugin/target/${{ github.event.inputs.build_profile || 'release' }}/*.pdb
+          if-no-files-found: error
+          retention-days: 90
