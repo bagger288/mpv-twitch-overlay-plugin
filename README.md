@@ -1,1 +1,0 @@
-# mpv-twitch-overlay-plugin
