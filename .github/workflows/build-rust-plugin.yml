@@ -3,13 +3,7 @@ name: Build Twitch Chat mpv Rust Plugin (Windows x64)
 on:
   push:
     branches: [ main, master ]
-    paths:
-      - 'twitch_records/rust_plugin/**'
-      - '.github/workflows/build-rust-plugin.yml'
   pull_request:
-    paths:
-      - 'twitch_records/rust_plugin/**'
-      - '.github/workflows/build-rust-plugin.yml'
   workflow_dispatch:
     inputs:
       build_profile:
@@ -38,49 +32,76 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
 
+      - name: Detect Project Root
+        id: proj
+        shell: pwsh
+        run: |
+          if (Test-Path "Cargo.toml") {
+            Write-Host "Found Cargo.toml in repository root"
+            "crate_dir=." >> $env:GITHUB_OUTPUT
+            "target_dir=target" >> $env:GITHUB_OUTPUT
+          } elseif (Test-Path "twitch_records/rust_plugin/Cargo.toml") {
+            Write-Host "Found Cargo.toml in twitch_records/rust_plugin"
+            "crate_dir=twitch_records/rust_plugin" >> $env:GITHUB_OUTPUT
+            "target_dir=twitch_records/rust_plugin/target" >> $env:GITHUB_OUTPUT
+          } else {
+            Write-Error "Could not locate Cargo.toml in root or twitch_records/rust_plugin"
+            exit 1
+          }
+
       - name: Cache Cargo Dependencies & Build Artifacts
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: |
-            twitch_records/rust_plugin -> target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('twitch_records/rust_plugin/Cargo.toml') }}
+            ${{ steps.proj.outputs.crate_dir }} -> ${{ steps.proj.outputs.target_dir }}
 
       - name: Check Code Syntax & Types
+        shell: pwsh
         run: |
-          cd twitch_records/rust_plugin
+          Set-Location "${{ steps.proj.outputs.crate_dir }}"
           cargo check --verbose
 
       - name: Build Rust Plugin (Release)
         if: "${{ github.event.inputs.build_profile != 'debug' }}"
+        shell: pwsh
         run: |
-          cd twitch_records/rust_plugin
+          Set-Location "${{ steps.proj.outputs.crate_dir }}"
           cargo build --release --verbose
 
       - name: Build Rust Plugin (Debug)
         if: "${{ github.event.inputs.build_profile == 'debug' }}"
+        shell: pwsh
         run: |
-          cd twitch_records/rust_plugin
+          Set-Location "${{ steps.proj.outputs.crate_dir }}"
           cargo build --verbose
 
-      - name: Verify DLL Generation
-        shell: bash
+      - name: Locate & Verify DLL Generation
+        id: verify
+        shell: pwsh
         run: |
-          PROFILE="${{ github.event.inputs.build_profile || 'release' }}"
-          DLL_PATH="twitch_records/rust_plugin/target/${PROFILE}/twitch_chat.dll"
-          if [ -f "$DLL_PATH" ]; then
-            echo "DLL build succeeded: $DLL_PATH"
-            ls -lh "$DLL_PATH"
-          else
-            echo "Error: DLL was not found at $DLL_PATH"
+          $profile = "${{ github.event.inputs.build_profile }}"
+          if ([string]::IsNullOrWhiteSpace($profile)) { $profile = "release" }
+          
+          $targetBase = "${{ steps.proj.outputs.target_dir }}"
+          $dllCandidate = Join-Path $targetBase "$profile\twitch_chat.dll"
+          
+          if (Test-Path $dllCandidate) {
+            Write-Host "Successfully generated: $dllCandidate"
+            Get-Item $dllCandidate | Select-Object Name, Length, LastWriteTime
+            "dll_path=$dllCandidate" >> $env:GITHUB_OUTPUT
+            "dll_dir=$(Split-Path -Parent $dllCandidate)" >> $env:GITHUB_OUTPUT
+          } else {
+            Write-Error "twitch_chat.dll not found at expected path: $dllCandidate"
+            Get-ChildItem -Recurse -Filter "*.dll" | Select-Object FullName
             exit 1
-          fi
+          }
 
       - name: Upload twitch_chat.dll Artifact
         uses: actions/upload-artifact@v4
         with:
           name: twitch_chat-windows-x64
           path: |
-            twitch_records/rust_plugin/target/${{ github.event.inputs.build_profile || 'release' }}/twitch_chat.dll
-            twitch_records/rust_plugin/target/${{ github.event.inputs.build_profile || 'release' }}/*.pdb
+            ${{ steps.verify.outputs.dll_dir }}/twitch_chat.dll
+            ${{ steps.verify.outputs.dll_dir }}/*.pdb
           if-no-files-found: error
           retention-days: 90
