@@ -2,7 +2,20 @@
 //! Supports dynamic symbol resolution in-process on Windows so no link-time mpv.lib is required.
 
 use std::ffi::{c_char, c_double, c_int, c_void, CStr, CString};
+use std::io::Write;
 use std::ptr;
+
+pub fn log_plugin(msg: &str) {
+    eprintln!("[twitch_chat_rust] {}", msg);
+    let log_path = std::env::temp_dir().join("mpv_twitch_chat_rust.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(log_path) {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let _ = writeln!(f, "[{}] {}", timestamp, msg);
+    }
+}
 
 pub type MpvHandleRaw = *mut c_void;
 

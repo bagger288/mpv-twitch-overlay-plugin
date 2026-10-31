@@ -1,8 +1,6 @@
 //! Emote and Badge in-memory caching and resizing
 
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use tiny_skia::Pixmap;
 
