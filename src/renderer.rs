@@ -126,6 +126,19 @@ impl ChatRenderer {
             if is_settings { [255, 255, 255, 255] } else { [160, 160, 175, 255] },
         );
 
+        // Display channel name tag if available
+        if !channel_name.is_empty() && width >= 380.0 {
+            let ch_display = format!("#{}", channel_name);
+            self.draw_text(
+                pixmap,
+                &ch_display,
+                214.0,
+                7.0,
+                11.0,
+                [191, 148, 255, 255],
+            );
+        }
+
         // Offset indicator if non-zero
         if ui.offset_ms != 0 {
             let offset_sec = ui.offset_ms as f32 / 1000.0;
@@ -350,7 +363,7 @@ impl ChatRenderer {
         self.draw_text(pixmap, "Позиция:", 12.0, cur_y + 3.0, 12.0, [200, 200, 220, 255]);
         let pos_labels = ["↖ ВЛ", "↙ НЛ", "↗ ВП", "↘ НП"];
         let mut px = 75.0;
-        for (i, plbl) in pos_labels.iter().enumerate() {
+        for plbl in &pos_labels {
             let hb = HitBox::new(px, cur_y, 48.0, 22.0);
             self.draw_button(pixmap, &hb, plbl, false, [32, 33, 42, 255], [240, 240, 255, 255]);
             px += 54.0;
