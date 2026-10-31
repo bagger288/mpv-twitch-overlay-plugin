@@ -134,7 +134,10 @@ unsafe fn resolve_symbol<T>(symbol_name: &str) -> Option<T> {
     }
 
     // Try common mpv dll names if hosted as a library
-    for module_name in &["mpv-2.dll", "mpv-1.dll", "mpv.dll", "libmpv-2.dll"] {
+    for module_name in &[
+        "mpv-2.dll", "libmpv-2.dll", "mpv-1.dll", "libmpv-1.dll", 
+        "mpv.dll", "libmpv.dll", "mpvnet.exe", "mpv.exe"
+    ] {
         let wide: Vec<u16> = OsStr::new(module_name)
             .encode_wide()
             .chain(std::iter::once(0))
@@ -163,43 +166,73 @@ pub unsafe fn init_vtable() -> bool {
 
     let client_name = match resolve_symbol::<FnClientName>("mpv_client_name") {
         Some(f) => f,
-        None => return false,
+        None => {
+            log_plugin("init_vtable: failed to resolve mpv_client_name");
+            return false;
+        }
     };
     let wait_event = match resolve_symbol::<FnWaitEvent>("mpv_wait_event") {
         Some(f) => f,
-        None => return false,
+        None => {
+            log_plugin("init_vtable: failed to resolve mpv_wait_event");
+            return false;
+        }
     };
     let command = match resolve_symbol::<FnCommand>("mpv_command") {
         Some(f) => f,
-        None => return false,
+        None => {
+            log_plugin("init_vtable: failed to resolve mpv_command");
+            return false;
+        }
     };
     let command_string = match resolve_symbol::<FnCommandString>("mpv_command_string") {
         Some(f) => f,
-        None => return false,
+        None => {
+            log_plugin("init_vtable: failed to resolve mpv_command_string");
+            return false;
+        }
     };
     let observe_property = match resolve_symbol::<FnObserveProperty>("mpv_observe_property") {
         Some(f) => f,
-        None => return false,
+        None => {
+            log_plugin("init_vtable: failed to resolve mpv_observe_property");
+            return false;
+        }
     };
     let set_property = match resolve_symbol::<FnSetProperty>("mpv_set_property") {
         Some(f) => f,
-        None => return false,
+        None => {
+            log_plugin("init_vtable: failed to resolve mpv_set_property");
+            return false;
+        }
     };
     let set_property_string = match resolve_symbol::<FnSetPropertyString>("mpv_set_property_string") {
         Some(f) => f,
-        None => return false,
+        None => {
+            log_plugin("init_vtable: failed to resolve mpv_set_property_string");
+            return false;
+        }
     };
     let get_property = match resolve_symbol::<FnGetProperty>("mpv_get_property") {
         Some(f) => f,
-        None => return false,
+        None => {
+            log_plugin("init_vtable: failed to resolve mpv_get_property");
+            return false;
+        }
     };
     let get_property_string = match resolve_symbol::<FnGetPropertyString>("mpv_get_property_string") {
         Some(f) => f,
-        None => return false,
+        None => {
+            log_plugin("init_vtable: failed to resolve mpv_get_property_string");
+            return false;
+        }
     };
     let free = match resolve_symbol::<FnFree>("mpv_free") {
         Some(f) => f,
-        None => return false,
+        None => {
+            log_plugin("init_vtable: failed to resolve mpv_free");
+            return false;
+        }
     };
 
     VTABLE = Some(MpvVTable {
@@ -338,7 +371,15 @@ impl MpvHandle {
         }
     }
 
-    /// Update overlay bitmap directly via mpv overlay-add
+pub fn log_plugin(msg: &str) {
+    let p = std::env::temp_dir().join("mpv_twitch_chat_rust.log");
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
+        let _ = writeln!(f, "[TwitchChatRust] {}", msg);
+    }
+}
+
+    /// Update overlay bitmap directly via mpv overlay-add using high-speed temp file
     pub fn overlay_add_bgra(
         &self,
         id: u32,
@@ -349,8 +390,13 @@ impl MpvHandle {
         height: u32,
         stride: u32,
     ) -> i32 {
-        // mpv overlay-add command: overlay-add <id> <x> <y> "@<memory_address>" 0 "bgra" <w> <h> <stride>
-        let addr_str = format!("@{}", bgra_data.as_ptr() as usize);
+        let temp_file = std::env::temp_dir().join(format!("mpv_twitch_overlay_{}.raw", id));
+        if let Err(e) = std::fs::write(&temp_file, bgra_data) {
+            log_plugin(&format!("Failed to write overlay raw file: {}", e));
+            return -1;
+        }
+
+        let temp_str = temp_file.to_string_lossy().replace('\\', "/");
         let id_str = id.to_string();
         let x_str = x.to_string();
         let y_str = y.to_string();
@@ -358,18 +404,22 @@ impl MpvHandle {
         let h_str = height.to_string();
         let stride_str = stride.to_string();
 
-        self.command(&[
+        let ret = self.command(&[
             "overlay-add",
             &id_str,
             &x_str,
             &y_str,
-            &addr_str,
+            &temp_str,
             "0",
             "bgra",
             &w_str,
             &h_str,
             &stride_str,
-        ])
+        ]);
+        if ret < 0 {
+            log_plugin(&format!("mpv overlay-add returned error code: {}", ret));
+        }
+        ret
     }
 
     pub fn overlay_remove(&self, id: u32) -> i32 {

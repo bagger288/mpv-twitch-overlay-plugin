@@ -76,27 +76,47 @@ pub struct SessionManager {
 impl SessionManager {
     /// Discovers and loads session files from video path or directory
     pub fn try_load(path: &Path) -> Option<Self> {
-        let (session_dir, base_name) = if path.is_dir() {
-            (path.to_path_buf(), path.file_name()?.to_string_lossy().to_string())
+        let (session_dir, base_name, direct_session) = if path.is_dir() {
+            (path.to_path_buf(), path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(), None)
+        } else if path.to_string_lossy().ends_with(".session.json") {
+            let parent = path.parent().unwrap_or(Path::new(".")).to_path_buf();
+            (parent, String::new(), Some(path.to_path_buf()))
         } else {
-            let parent = path.parent()?.to_path_buf();
-            let stem = path.file_stem()?.to_string_lossy().to_string();
-            // In case of multi-part filename like "channel_date.ts"
-            (parent, stem)
+            let parent = path.parent().unwrap_or(Path::new(".")).to_path_buf();
+            let stem = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+            (parent, stem, None)
         };
 
         // Find .session.json
-        let mut session_file = session_dir.join(format!("{}.session.json", base_name));
+        let mut session_file = if let Some(ds) = direct_session {
+            ds
+        } else {
+            session_dir.join(format!("{}.session.json", base_name))
+        };
+
         if !session_file.exists() {
             // Try scanning dir for any *.session.json
             if let Ok(entries) = fs::read_dir(&session_dir) {
                 for e in entries.flatten() {
                     let p = e.path();
-                    if p.extension().map_or(false, |ext| ext == "json")
-                        && p.to_string_lossy().ends_with(".session.json")
-                    {
+                    if p.to_string_lossy().ends_with(".session.json") {
                         session_file = p;
                         break;
+                    }
+                }
+            }
+        }
+
+        if !session_file.exists() {
+            // Also check parent directory if path was a sub-item
+            if let Some(parent) = session_dir.parent() {
+                if let Ok(entries) = fs::read_dir(parent) {
+                    for e in entries.flatten() {
+                        let p = e.path();
+                        if p.to_string_lossy().ends_with(".session.json") {
+                            session_file = p;
+                            break;
+                        }
                     }
                 }
             }
