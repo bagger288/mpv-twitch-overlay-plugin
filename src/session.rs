@@ -343,4 +343,76 @@ impl SessionManager {
         }
         false
     }
+
+    /// Searches messages case-insensitively (supporting English and Russian)
+    pub fn search_messages(
+        &self,
+        query: &str,
+        session_start_ms: i64,
+        offset_ms: i64,
+        max_results: usize,
+    ) -> Vec<crate::ui::SearchResult> {
+        let q = query.trim().to_lowercase();
+        if q.is_empty() {
+            return Vec::new();
+        }
+
+        let mut results = Vec::new();
+        for (idx, msg) in self.messages.iter().enumerate() {
+            let matches_text = msg.text.to_lowercase().contains(&q);
+            let matches_author = msg.author.to_lowercase().contains(&q)
+                || msg.display_name.to_lowercase().contains(&q);
+
+            if matches_text || matches_author {
+                let sec = ((msg.timestamp_ms - session_start_ms - offset_ms) as f64 / 1000.0).max(0.0);
+                results.push(crate::ui::SearchResult {
+                    msg_idx: idx,
+                    timestamp_ms: msg.timestamp_ms,
+                    sec,
+                    time_str: format_hms(sec),
+                    author: msg.display_name.clone(),
+                    color_hex: msg.color_hex.clone(),
+                    text: msg.text.clone(),
+                });
+
+                if results.len() >= max_results {
+                    break;
+                }
+            }
+        }
+        results
+    }
 }
+
+pub fn format_hms(seconds: f64) -> String {
+    let s = seconds.max(0.0).round() as i64;
+    let h = s / 3600;
+    let m = (s % 3600) / 60;
+    let sec = s % 60;
+    if h > 0 {
+        format!("{:02}:{:02}:{:02}", h, m, sec)
+    } else {
+        format!("{:02}:{:02}", m, sec)
+    }
+}
+
+pub fn swap_keyboard_layout(input: &str) -> String {
+    const EN: &str = "qwertyuiop[]asdfghjkl;'zxcvbnm,./`QWERTYUIOP{}ASDFGHJKL:\"ZXCVBNM<>?~";
+    const RU: &str = "йцукенгшщзхъфывапролджэячсмитьбю.ёЙЦУКЕНГШЩЗХЪФЫВАПРОЛДЖЭЯЧСМИТЬБЮ,Ё";
+
+    let en_chars: Vec<char> = EN.chars().collect();
+    let ru_chars: Vec<char> = RU.chars().collect();
+
+    let mut out = String::with_capacity(input.len());
+    for c in input.chars() {
+        if let Some(pos) = en_chars.iter().position(|&ec| ec == c) {
+            out.push(ru_chars[pos]);
+        } else if let Some(pos) = ru_chars.iter().position(|&rc| rc == c) {
+            out.push(en_chars[pos]);
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
