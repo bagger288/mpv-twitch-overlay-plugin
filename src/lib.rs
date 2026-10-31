@@ -23,7 +23,7 @@ use std::path::PathBuf;
 use ui::{HitBox, UiState, UiView};
 
 // Unique overlay ID (ID 42 is used by thumbfast.lua and caused collisions!)
-const OVERLAY_ID: u32 = 9420;
+const OVERLAY_ID: u32 = 1;
 
 #[derive(serde::Deserialize, Default)]
 struct MousePos {
