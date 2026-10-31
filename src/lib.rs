@@ -33,33 +33,31 @@ fn pop_last_char(s: &str) -> String {
 }
 
 /// Builds the mpv input-section string that binds every printable ASCII key
-/// (Latin a-z/A-Z, digits, common symbols) plus BS / ENTER / ESC to
-/// `script-message-to twitch_chat ...` commands.
+/// to `script-message-to twitch_chat ...` commands.
 ///
 /// This is the Rust equivalent of Lua's `enable_search_keys()` that called
 /// `mp.add_forced_key_binding(...)` per character.
 ///
-/// IMPORTANT: mpv's input.conf parser does not reliably accept non-ASCII key
-/// names (Cyrillic letters crash some builds). For Cyrillic search input,
-/// the user types Latin letters and clicks the [RU ⇄ EN] button in the UI,
-/// which runs `swap_keyboard_layout()` on the current query.
+/// IMPORTANT: mpv's input.conf parser is strict about key names. Single
+/// punctuation characters like `!`, `?`, `@`, `#`, `:`, `_` are NOT valid
+/// key names — in mpv they must be expressed as `Shift+1`, `Shift+/`,
+/// `Shift+2`, `Shift+3`, `Shift+;`, `Shift+-` etc. Binding a bare `!` crashes
+/// the parser. To stay safe, we only bind:
+///   - SPACE
+///   - Latin letters a-z / A-Z (via Shift+)
+///   - Digits 0-9
+///   - BS, ENTER, ESC
+///
+/// For Cyrillic search input or symbol queries, the user types Latin letters
+/// and clicks the [RU ⇄ EN] button in the UI, which runs
+/// `swap_keyboard_layout()` on the current query.
 fn build_search_keys_section() -> String {
-    let mut bindings = String::with_capacity(4096);
+    let mut bindings = String::with_capacity(2048);
 
-    // ASCII symbols (no Shift+<symbol> — those are not valid mpv key names).
+    // SPACE → type a literal space character
     push_type_binding(&mut bindings, "SPACE", " ");
-    push_type_binding(&mut bindings, "-", "-");
-    push_type_binding(&mut bindings, "_", "_");
-    push_type_binding(&mut bindings, ".", ".");
-    push_type_binding(&mut bindings, ",", ",");
-    push_type_binding(&mut bindings, "!", "!");
-    push_type_binding(&mut bindings, "?", "?");
-    push_type_binding(&mut bindings, "@", "@");
-    push_type_binding(&mut bindings, "#", "#");
-    push_type_binding(&mut bindings, "/", "/");
-    push_type_binding(&mut bindings, ":", ":");
 
-    // Digits 0-9
+    // Digits 0-9 (all are valid mpv key names)
     for d in 0..=9u8 {
         let s = (d as char).to_string();
         push_type_binding(&mut bindings, &s, &s);
