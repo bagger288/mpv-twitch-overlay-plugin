@@ -538,6 +538,12 @@ impl PluginState {
     }
 }
 
+fn is_vo_configured(mpv: &MpvHandle) -> bool {
+    mpv.get_property_string("vo-configured")
+        .map(|s| s.eq_ignore_ascii_case("yes") || s == "1" || s.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
 /// Native mpv C-plugin entry point exported from DLL
 #[no_mangle]
 pub unsafe extern "C" fn mpv_open_cplugin(ctx: MpvHandleRaw) -> c_int {
@@ -607,16 +613,15 @@ pub unsafe extern "C" fn mpv_open_cplugin(ctx: MpvHandleRaw) -> c_int {
                     }
                     4 => {
                         // vo-configured changed
-                        if let Some(configured) = state.mpv.get_property_bool("vo-configured") {
-                            state.vo_configured = configured;
-                            if !configured {
-                                if state.overlay_active {
-                                    state.mpv.overlay_remove(OVERLAY_ID);
-                                    state.overlay_active = false;
-                                }
-                            } else {
-                                state.update_frame();
+                        let configured = is_vo_configured(&state.mpv);
+                        state.vo_configured = configured;
+                        if !configured {
+                            if state.overlay_active {
+                                state.mpv.overlay_remove(OVERLAY_ID);
+                                state.overlay_active = false;
                             }
+                        } else {
+                            state.update_frame();
                         }
                     }
                     5 => {
@@ -632,9 +637,7 @@ pub unsafe extern "C" fn mpv_open_cplugin(ctx: MpvHandleRaw) -> c_int {
             }
             MpvEventId::PlaybackRestart => {
                 state.playback_active = true;
-                if let Some(configured) = state.mpv.get_property_bool("vo-configured") {
-                    state.vo_configured = configured;
-                }
+                state.vo_configured = is_vo_configured(&state.mpv);
                 if let Some(tp) = state.mpv.get_property_double("time-pos") {
                     state.current_time_pos = tp;
                 }
@@ -647,9 +650,7 @@ pub unsafe extern "C" fn mpv_open_cplugin(ctx: MpvHandleRaw) -> c_int {
             }
             MpvEventId::FileLoaded => {
                 state.playback_active = true;
-                if let Some(configured) = state.mpv.get_property_bool("vo-configured") {
-                    state.vo_configured = configured;
-                }
+                state.vo_configured = is_vo_configured(&state.mpv);
                 if let Some(p) = state.mpv.get_property_string("path") {
                     state.on_path_changed(&p);
                 }
