@@ -126,6 +126,19 @@ impl ChatRenderer {
             if is_settings { [255, 255, 255, 255] } else { [160, 160, 175, 255] },
         );
 
+        // Display channel name tag if available
+        if !channel_name.is_empty() && width >= 380.0 {
+            let ch_display = format!("#{}", channel_name);
+            self.draw_text(
+                pixmap,
+                &ch_display,
+                214.0,
+                7.0,
+                11.0,
+                [191, 148, 255, 255],
+            );
+        }
+
         // Offset indicator if non-zero
         if ui.offset_ms != 0 {
             let offset_sec = ui.offset_ms as f32 / 1000.0;
@@ -216,8 +229,8 @@ impl ChatRenderer {
             }
         }
 
-        // If scrolled back in history, render banner at bottom
-        if ui.scroll_offset > 0 {
+        // If scrolled away from live (either direction), render banner at bottom
+        if ui.scroll_offset != 0 {
             let ban_h = 24.0;
             let ban_y = height - ban_h - 4.0;
             let mut ban_paint = Paint::default();
@@ -226,7 +239,12 @@ impl ChatRenderer {
                 pixmap.fill_rect(r, &ban_paint, Transform::identity(), None);
             }
 
-            let msg_text = format!("⬇ Чат: назад (-{}) | Клик: к live", ui.scroll_offset);
+            // Mirrors Lua: positive offset = scrolled back, negative = scrolled forward.
+            let msg_text = if ui.scroll_offset > 0 {
+                format!("⬇ Чат: назад (-{}) | Клик: к live", ui.scroll_offset)
+            } else {
+                format!("⬆ Чат: вперёд (+{}) | Клик: к live", -ui.scroll_offset)
+            };
             self.draw_text(pixmap, &msg_text, 14.0, ban_y + 5.0, 11.0, [0, 255, 230, 255]);
         }
     }
@@ -350,7 +368,7 @@ impl ChatRenderer {
         self.draw_text(pixmap, "Позиция:", 12.0, cur_y + 3.0, 12.0, [200, 200, 220, 255]);
         let pos_labels = ["↖ ВЛ", "↙ НЛ", "↗ ВП", "↘ НП"];
         let mut px = 75.0;
-        for (i, plbl) in pos_labels.iter().enumerate() {
+        for plbl in &pos_labels {
             let hb = HitBox::new(px, cur_y, 48.0, 22.0);
             self.draw_button(pixmap, &hb, plbl, false, [32, 33, 42, 255], [240, 240, 255, 255]);
             px += 54.0;
