@@ -38,24 +38,19 @@ fn pop_last_char(s: &str) -> String {
 /// This is the Rust equivalent of Lua's `enable_search_keys()` that called
 /// `mp.add_forced_key_binding(...)` per character.
 ///
-/// IMPORTANT: mpv's input.conf parser is strict about key names. Single
-/// punctuation characters like `!`, `?`, `@`, `#`, `:`, `_` are NOT valid
-/// key names — in mpv they must be expressed as `Shift+1`, `Shift+/`,
-/// `Shift+2`, `Shift+3`, `Shift+;`, `Shift+-` etc. Binding a bare `!` crashes
-/// the parser. To stay safe, we only bind:
-///   - SPACE
-///   - Latin letters a-z / A-Z (via Shift+)
-///   - Digits 0-9
-///   - BS, ENTER, ESC
+/// IMPORTANT: mpv's input.conf parser is strict. We avoid:
+///   - Non-ASCII key names (Cyrillic) — crash the parser.
+///   - Bare punctuation as key names (`!`, `?`, `@`, etc.) — must be `Shift+1` etc.
+///   - Quoted arguments (`type_key " "`) — the `"` inside the content string
+///     confuses mpv's define-section parser and crashes it.
 ///
-/// For Cyrillic search input or symbol queries, the user types Latin letters
-/// and clicks the [RU ⇄ EN] button in the UI, which runs
-/// `swap_keyboard_layout()` on the current query.
+/// SPACE is bound to a dedicated `search_space` command (no args) to avoid
+/// the quoted-space issue.
 fn build_search_keys_section() -> String {
     let mut bindings = String::with_capacity(2048);
 
-    // SPACE → type a literal space character
-    push_type_binding(&mut bindings, "SPACE", " ");
+    // SPACE → dedicated command (avoids quoted " " argument that crashes mpv)
+    push_cmd_binding(&mut bindings, "SPACE", "search_space");
 
     // Digits 0-9 (all are valid mpv key names)
     for d in 0..=9u8 {
@@ -81,16 +76,12 @@ fn build_search_keys_section() -> String {
 }
 
 /// Append a `KEY script-message-to twitch_chat type_key <ch>` binding.
-/// A literal space is quoted so mpv's input.conf parser keeps it as one arg.
+/// `ch` must be a single non-space ASCII character (digit or letter).
 fn push_type_binding(out: &mut String, key: &str, ch: &str) {
     out.push_str(key);
-    if ch == " " {
-        out.push_str(" script-message-to twitch_chat type_key \" \"\n");
-    } else {
-        out.push_str(" script-message-to twitch_chat type_key ");
-        out.push_str(ch);
-        out.push('\n');
-    }
+    out.push_str(" script-message-to twitch_chat type_key ");
+    out.push_str(ch);
+    out.push('\n');
 }
 
 /// Append a `KEY script-message-to twitch_chat <cmd>` binding (no extra arg).
@@ -266,6 +257,13 @@ impl PluginState {
             "init_search_keys_section: content length = {} bytes, {} lines",
             content.len(),
             content.matches('\n').count() + 1
+        ));
+        // Log first 500 chars for debugging — if mpv crashes inside define-section,
+        // this shows the exact content that triggered it.
+        let preview: String = content.chars().take(500).collect();
+        log_plugin(&format!(
+            "init_search_keys_section: content preview (first 500 chars):\n{}",
+            preview
         ));
 
         log_plugin("init_search_keys_section: calling define-section...");
@@ -1000,6 +998,13 @@ pub unsafe extern "C" fn mpv_open_cplugin(ctx: MpvHandleRaw) -> c_int {
                                     state.ui.search_query = pop_last_char(&state.ui.search_query);
                                     state.perform_search();
                                 }
+                            }
+                            // SPACE key — append a literal space to the query.
+                            // (Bound to a dedicated command to avoid the
+                            // quoted " " argument that crashes mpv's parser.)
+                            "search_space" | "twitch_chat/search_space" => {
+                                state.ui.search_query.push(' ');
+                                state.perform_search();
                             }
                             "search_enter" | "twitch_chat/search_enter" => {
                                 // ENTER = jump to the first (oldest) result, like Lua.
