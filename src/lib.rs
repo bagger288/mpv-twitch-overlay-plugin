@@ -243,16 +243,21 @@ impl PluginState {
 
         // 1. Header Tabs & Buttons
         if ChatRenderer::btn_tab_chat().contains(rel_x, rel_y) {
+            log_plugin("on_click_event: clicked [Chat] tab");
             self.ui.current_view = UiView::Chat;
             self.update_frame();
             return;
         }
         if ChatRenderer::btn_tab_search().contains(rel_x, rel_y) {
+            log_plugin("on_click_event: clicked [Search] tab — switching view to Search");
             self.ui.current_view = UiView::Search;
+            log_plugin("on_click_event: calling update_frame to sync view property...");
             self.update_frame();
+            log_plugin("on_click_event: update_frame returned, Search view active");
             return;
         }
         if ChatRenderer::btn_tab_settings().contains(rel_x, rel_y) {
+            log_plugin("on_click_event: clicked [Settings] tab");
             self.ui.current_view = UiView::Settings;
             self.update_frame();
             return;
@@ -602,8 +607,12 @@ impl PluginState {
             UiView::Settings => "settings",
         };
         let enabled_str = if self.ui.chat_enabled { "yes" } else { "no" };
-        self.mpv.set_property_string("user-data/twitch_chat/view", view_str);
-        self.mpv.set_property_string("user-data/twitch_chat/enabled", enabled_str);
+        let r1 = self.mpv.set_property_string("user-data/twitch_chat/view", view_str);
+        let r2 = self.mpv.set_property_string("user-data/twitch_chat/enabled", enabled_str);
+        log_plugin(&format!(
+            "update_frame: synced view='{}' (ret={}), enabled='{}' (ret={})",
+            view_str, r1, enabled_str, r2
+        ));
 
         if !self.ui.chat_enabled {
             if self.overlay_active {
@@ -832,17 +841,25 @@ pub unsafe extern "C" fn mpv_open_cplugin(ctx: MpvHandleRaw) -> c_int {
                             // type_key <char>: append a single character to the query.
                             "type_key" | "twitch_chat/type_key" => {
                                 if args.len() >= 2 {
+                                    log_plugin(&format!(
+                                        "type_key: received char='{}' ({} bytes), current query='{}'",
+                                        args[1], args[1].len(), state.ui.search_query
+                                    ));
                                     state.ui.search_query.push_str(&args[1]);
                                     state.perform_search();
+                                } else {
+                                    log_plugin("type_key: received without char argument");
                                 }
                             }
                             "search_bs" | "twitch_chat/search_bs" => {
+                                log_plugin("search_bs: received");
                                 if !state.ui.search_query.is_empty() {
                                     state.ui.search_query = pop_last_char(&state.ui.search_query);
                                     state.perform_search();
                                 }
                             }
                             "search_space" | "twitch_chat/search_space" => {
+                                log_plugin("search_space: received");
                                 state.ui.search_query.push(' ');
                                 state.perform_search();
                             }
