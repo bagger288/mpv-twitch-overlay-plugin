@@ -66,6 +66,12 @@ pub struct MpvEventProperty {
 }
 
 #[repr(C)]
+pub struct MpvEventClientMessage {
+    pub num_args: c_int,
+    pub args: *mut *const c_char,
+}
+
+#[repr(C)]
 pub struct MpvEvent {
     pub event_id: MpvEventId,
     pub error: c_int,
@@ -432,6 +438,25 @@ impl MpvHandle {
         }
     }
 
+    pub fn get_property_bool(&self, name: &str) -> Option<bool> {
+        unsafe {
+            let vt = VTABLE.as_ref().unwrap();
+            let c_name = CString::new(name).unwrap();
+            let mut val: c_int = 0;
+            let res = (vt.get_property)(
+                self.raw,
+                c_name.as_ptr(),
+                MpvFormat::Flag,
+                &mut val as *mut c_int as *mut c_void,
+            );
+            if res >= 0 {
+                Some(val != 0)
+            } else {
+                None
+            }
+        }
+    }
+
     pub fn command(&self, args: &[&str]) -> i32 {
         unsafe {
             let vt = VTABLE.as_ref().unwrap();
@@ -461,10 +486,14 @@ impl MpvHandle {
         height: u32,
         stride: u32,
     ) -> i32 {
-        let temp_file = std::env::temp_dir().join(format!("mpv_twitch_overlay_{}.raw", id));
-        if let Err(e) = std::fs::write(&temp_file, bgra_data) {
-            log_plugin(&format!("Failed to write overlay raw file: {}", e));
-            return -1;
+        let temp_dir = std::env::temp_dir();
+        let temp_file = temp_dir.join(format!("mpv_twitch_overlay_{}.raw", id));
+        let temp_tmp = temp_dir.join(format!("mpv_twitch_overlay_{}.tmp", id));
+
+        if let Ok(_) = std::fs::write(&temp_tmp, bgra_data) {
+            let _ = std::fs::rename(&temp_tmp, &temp_file);
+        } else {
+            let _ = std::fs::write(&temp_file, bgra_data);
         }
 
         let temp_str = temp_file.to_string_lossy().replace('\\', "/");
