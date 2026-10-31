@@ -32,17 +32,21 @@ fn pop_last_char(s: &str) -> String {
     chars.as_str().to_string()
 }
 
-/// Builds the mpv input-section string that binds every printable key
-/// (Latin a-z/A-Z, Cyrillic а-я/А-Я, digits, common symbols) plus
-/// BS / ENTER / ESC to `script-message-to twitch_chat ...` commands.
+/// Builds the mpv input-section string that binds every printable ASCII key
+/// (Latin a-z/A-Z, digits, common symbols) plus BS / ENTER / ESC to
+/// `script-message-to twitch_chat ...` commands.
 ///
 /// This is the Rust equivalent of Lua's `enable_search_keys()` that called
-/// `mp.add_forced_key_binding(...)` per character. We use free helper functions
-/// instead of closures so the borrow of `bindings` is released between calls.
+/// `mp.add_forced_key_binding(...)` per character.
+///
+/// IMPORTANT: mpv's input.conf parser does not reliably accept non-ASCII key
+/// names (Cyrillic letters crash some builds). For Cyrillic search input,
+/// the user types Latin letters and clicks the [RU ⇄ EN] button in the UI,
+/// which runs `swap_keyboard_layout()` on the current query.
 fn build_search_keys_section() -> String {
-    let mut bindings = String::with_capacity(8192);
+    let mut bindings = String::with_capacity(4096);
 
-    // Symbols
+    // ASCII symbols (no Shift+<symbol> — those are not valid mpv key names).
     push_type_binding(&mut bindings, "SPACE", " ");
     push_type_binding(&mut bindings, "-", "-");
     push_type_binding(&mut bindings, "_", "_");
@@ -54,8 +58,6 @@ fn build_search_keys_section() -> String {
     push_type_binding(&mut bindings, "#", "#");
     push_type_binding(&mut bindings, "/", "/");
     push_type_binding(&mut bindings, ":", ":");
-    push_type_binding(&mut bindings, "(", "(");
-    push_type_binding(&mut bindings, ")", ")");
 
     // Digits 0-9
     for d in 0..=9u8 {
@@ -67,17 +69,6 @@ fn build_search_keys_section() -> String {
     for c in 'a'..='z' {
         let lower = c.to_string();
         let upper = c.to_ascii_uppercase().to_string();
-        push_type_binding(&mut bindings, &lower, &lower);
-        let shift_key = format!("Shift+{}", lower);
-        push_type_binding(&mut bindings, &shift_key, &upper);
-    }
-
-    // Cyrillic letters а-я / А-Я (via Shift+)
-    const CYR_LOWER: &str = "абвгдеёжзийклмнопрстуфхцчшщъыьэюя";
-    const CYR_UPPER: &str = "АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ";
-    for (l, u) in CYR_LOWER.chars().zip(CYR_UPPER.chars()) {
-        let lower = l.to_string();
-        let upper = u.to_string();
         push_type_binding(&mut bindings, &lower, &lower);
         let shift_key = format!("Shift+{}", lower);
         push_type_binding(&mut bindings, &shift_key, &upper);
@@ -271,17 +262,36 @@ impl PluginState {
         if self.search_keys_defined {
             return;
         }
+        log_plugin("init_search_keys_section: building section content...");
         let content = build_search_keys_section();
-        self.mpv.command(&[
+        log_plugin(&format!(
+            "init_search_keys_section: content length = {} bytes, {} lines",
+            content.len(),
+            content.matches('\n').count() + 1
+        ));
+
+        log_plugin("init_search_keys_section: calling define-section...");
+        let ret = self.mpv.command(&[
             "define-section",
             "twitch_chat_search_keys",
             content.as_str(),
             "force",
         ]);
-        // Always start disabled; only enabled when entering Search view.
-        self.mpv.command(&["disable-section", "twitch_chat_search_keys"]);
+        log_plugin(&format!(
+            "init_search_keys_section: define-section returned {}",
+            ret
+        ));
+
+        log_plugin("init_search_keys_section: calling disable-section...");
+        let ret2 = self.mpv.command(&["disable-section", "twitch_chat_search_keys"]);
+        log_plugin(&format!(
+            "init_search_keys_section: disable-section returned {}",
+            ret2
+        ));
+
         self.search_keys_defined = true;
         self.search_keys_enabled = false;
+        log_plugin("init_search_keys_section: done");
     }
 
     /// Enable or disable the search keyboard section based on the current view.
@@ -292,13 +302,24 @@ impl PluginState {
         }
         let want_enabled = self.ui.chat_enabled && self.ui.current_view == UiView::Search;
         if want_enabled && !self.search_keys_enabled {
-            // "force" makes the bindings take priority over default input handlers
-            self.mpv
+            log_plugin("update_search_keys_section: enabling search keys (force)");
+            let ret = self
+                .mpv
                 .command(&["enable-section", "twitch_chat_search_keys", "force"]);
+            log_plugin(&format!(
+                "update_search_keys_section: enable-section returned {}",
+                ret
+            ));
             self.search_keys_enabled = true;
         } else if !want_enabled && self.search_keys_enabled {
-            self.mpv
+            log_plugin("update_search_keys_section: disabling search keys");
+            let ret = self
+                .mpv
                 .command(&["disable-section", "twitch_chat_search_keys"]);
+            log_plugin(&format!(
+                "update_search_keys_section: disable-section returned {}",
+                ret
+            ));
             self.search_keys_enabled = false;
         }
     }
@@ -344,10 +365,18 @@ impl PluginState {
     }
 
     fn on_click_event(&mut self) {
+        log_plugin("on_click_event: entered");
         let (mx, my) = match get_client_cursor_pos(&self.mpv) {
             Some(pos) => pos,
-            None => return,
+            None => {
+                log_plugin("on_click_event: get_client_cursor_pos returned None");
+                return;
+            }
         };
+        log_plugin(&format!(
+            "on_click_event: cursor at ({}, {}), panel at ({}, {})",
+            mx, my, self.ui.panel_x, self.ui.panel_y
+        ));
 
         let rel_x = (mx - self.ui.panel_x) as f32;
         let rel_y = (my - self.ui.panel_y) as f32;
@@ -368,24 +397,31 @@ impl PluginState {
 
         // 1. Header Tabs & Buttons
         if ChatRenderer::btn_tab_chat().contains(rel_x, rel_y) {
+            log_plugin("on_click_event: clicked [Chat] tab");
             self.ui.current_view = UiView::Chat;
             self.update_search_keys_section();
             self.update_frame();
             return;
         }
         if ChatRenderer::btn_tab_search().contains(rel_x, rel_y) {
+            log_plugin("on_click_event: clicked [Search] tab");
             self.ui.current_view = UiView::Search;
+            log_plugin("on_click_event: calling update_search_keys_section...");
             self.update_search_keys_section();
+            log_plugin("on_click_event: back from update_search_keys_section, calling update_frame...");
             self.update_frame();
+            log_plugin("on_click_event: back from update_frame, done");
             return;
         }
         if ChatRenderer::btn_tab_settings().contains(rel_x, rel_y) {
+            log_plugin("on_click_event: clicked [Settings] tab");
             self.ui.current_view = UiView::Settings;
             self.update_search_keys_section();
             self.update_frame();
             return;
         }
         if ChatRenderer::btn_close(width).contains(rel_x, rel_y) {
+            log_plugin("on_click_event: clicked [Close] button");
             self.ui.chat_enabled = false;
             if self.overlay_active {
                 self.mpv.overlay_remove(OVERLAY_ID);
@@ -401,6 +437,7 @@ impl PluginState {
             }
             return;
         }
+        log_plugin(&format!("on_click_event: no header tab hit, view = {:?}", self.ui.current_view));
 
         // 2. View specific clicks
         match self.ui.current_view {
