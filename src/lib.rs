@@ -14,7 +14,7 @@ pub mod session;
 pub mod ui;
 
 use emotes::EmoteCache;
-use mpv_api::{log_plugin, MpvEventId, MpvFormat, MpvHandle, MpvHandleRaw};
+use mpv_api::{log_plugin, MpvEventClientMessage, MpvEventId, MpvFormat, MpvHandle, MpvHandleRaw};
 use renderer::ChatRenderer;
 use session::SessionManager;
 use std::os::raw::c_int;
@@ -27,7 +27,7 @@ const OVERLAY_ID: u32 = 1;
 
 /// Safely retrieves client cursor coordinates on Windows without triggering mpv node formatting crashes
 #[cfg(target_os = "windows")]
-fn get_client_cursor_pos(_mpv: &MpvHandle) -> Option<(i32, i32)> {
+fn get_client_cursor_pos(mpv: &MpvHandle) -> Option<(i32, i32)> {
     use std::os::raw::c_void;
 
     #[repr(C)]
@@ -41,7 +41,6 @@ fn get_client_cursor_pos(_mpv: &MpvHandle) -> Option<(i32, i32)> {
     extern "system" {
         fn GetCursorPos(lpPoint: *mut WinPoint) -> i32;
         fn ScreenToClient(hWnd: *mut c_void, lpPoint: *mut WinPoint) -> i32;
-        fn WindowFromPoint(point: WinPoint) -> *mut c_void;
         fn GetForegroundWindow() -> *mut c_void;
         fn GetCurrentProcessId() -> u32;
         fn GetWindowThreadProcessId(hWnd: *mut c_void, lpdwProcessId: *mut u32) -> u32;
@@ -56,13 +55,12 @@ fn get_client_cursor_pos(_mpv: &MpvHandle) -> Option<(i32, i32)> {
         let my_pid = GetCurrentProcessId();
         let mut target_hwnd: *mut c_void = std::ptr::null_mut();
 
-        // 1. Try window directly under cursor if it belongs to our mpv process
-        let win = WindowFromPoint(pt);
-        if !win.is_null() {
-            let mut pid: u32 = 0;
-            GetWindowThreadProcessId(win, &mut pid);
-            if pid == my_pid {
-                target_hwnd = win;
+        // 1. Try mpv's own window handle from "wid"
+        if let Some(wid_str) = mpv.get_property_string("wid") {
+            if let Ok(wid_num) = wid_str.parse::<usize>() {
+                if wid_num != 0 {
+                    target_hwnd = wid_num as *mut c_void;
+                }
             }
         }
 
@@ -688,14 +686,18 @@ pub unsafe extern "C" fn mpv_open_cplugin(ctx: MpvHandleRaw) -> c_int {
                 }
             }
             MpvEventId::ClientMessage => {
-                let msg_data = event.data as *mut *const std::ffi::c_char;
-                if !msg_data.is_null() {
+                let msg_ptr = event.data as *const MpvEventClientMessage;
+                if !msg_ptr.is_null() {
+                    let msg = unsafe { &*msg_ptr };
                     let mut args = Vec::new();
-                    let mut cur = msg_data;
-                    while !cur.is_null() && !(*cur).is_null() {
-                        let arg_str = unsafe { std::ffi::CStr::from_ptr(*cur).to_string_lossy() };
-                        args.push(arg_str.into_owned());
-                        cur = unsafe { cur.add(1) };
+                    if !msg.args.is_null() && msg.num_args > 0 {
+                        for i in 0..msg.num_args as isize {
+                            let str_ptr = unsafe { *msg.args.offset(i) };
+                            if !str_ptr.is_null() {
+                                let arg_str = unsafe { std::ffi::CStr::from_ptr(str_ptr).to_string_lossy() };
+                                args.push(arg_str.into_owned());
+                            }
+                        }
                     }
 
                     if let Some(first_arg) = args.first() {
