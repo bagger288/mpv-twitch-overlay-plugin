@@ -22,9 +22,10 @@ use std::os::raw::c_int;
 use std::path::PathBuf;
 use ui::{HitBox, UiState, UiView};
 
-const OVERLAY_ID: u32 = 42;
+// Unique overlay ID (ID 42 is used by thumbfast.lua and caused collisions!)
+const OVERLAY_ID: u32 = 9420;
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, Default)]
 struct MousePos {
     x: i32,
     y: i32,
@@ -43,9 +44,7 @@ struct PluginState {
     vo_configured: bool,
     playback_active: bool,
     overlay_active: bool,
-    last_mouse_x: i32,
-    last_mouse_y: i32,
-    mouse_inside_panel: bool,
+    bindings_initialized: bool,
     search_keys_active: bool,
 }
 
@@ -62,22 +61,22 @@ impl PluginState {
             vo_configured: false,
             playback_active: false,
             overlay_active: false,
-            last_mouse_x: 0,
-            last_mouse_y: 0,
-            mouse_inside_panel: false,
+            bindings_initialized: false,
             search_keys_active: false,
         }
     }
 
-    fn init_input_sections(&self) {
-        // Global hotkeys (default priority so mpv core bindings are preserved if unmapped)
-        let global_section = "c script-message-to twitch_chat toggle\ns script-message-to twitch_chat toggle_settings\nCtrl+f script-message-to twitch_chat toggle_search\n";
-        self.mpv.command(&["define-section", "twitch_chat_global", global_section, "default"]);
-        self.mpv.command(&["enable-section", "twitch_chat_global", "allow-hide-cursor"]);
+    /// Initializes hotkeys and mouse bindings safely after file is loaded and VO initialized
+    fn init_bindings(&mut self) {
+        if self.bindings_initialized {
+            return;
+        }
+        self.bindings_initialized = true;
 
-        // Mouse section: Only enabled when mouse cursor is hovering over the chat panel!
-        let mouse_section = "MBTN_LEFT script-message-to twitch_chat click\nWHEEL_UP script-message-to twitch_chat wheel_up\nWHEEL_DOWN script-message-to twitch_chat wheel_down\n";
-        self.mpv.command(&["define-section", "twitch_chat_mouse", mouse_section, "force"]);
+        log_plugin("Initializing plugin hotkeys and bindings");
+        let bindings = "c script-message-to twitch_chat toggle\ns script-message-to twitch_chat toggle_settings\nCtrl+f script-message-to twitch_chat toggle_search\nMBTN_LEFT script-message-to twitch_chat click\nWHEEL_UP script-message-to twitch_chat wheel_up\nWHEEL_DOWN script-message-to twitch_chat wheel_down\n";
+        self.mpv.command(&["define-section", "twitch_chat_keys", bindings, "default"]);
+        self.mpv.command(&["enable-section", "twitch_chat_keys", "allow-hide-cursor"]);
     }
 
     fn parse_script_opts(&mut self, opts: &str) {
@@ -231,23 +230,64 @@ impl PluginState {
         self.mpv.command(&["disable-section", "twitch_chat_search_keys"]);
     }
 
-    fn handle_mouse_move(&mut self, x: i32, y: i32, hover: bool) {
-        self.last_mouse_x = x;
-        self.last_mouse_y = y;
+    fn on_click_event(&mut self) {
+        // Query mouse position on demand only when clicked
+        let pos = if let Some(json) = self.mpv.get_property_string("mouse-pos") {
+            serde_json::from_str::<MousePos>(&json).unwrap_or_default()
+        } else {
+            return;
+        };
 
-        let inside = hover
-            && x >= self.ui.panel_x
-            && x <= self.ui.panel_x + self.ui.panel_width as i32
-            && y >= self.ui.panel_y
-            && y <= self.ui.panel_y + self.ui.panel_height as i32;
+        let inside = pos.x >= self.ui.panel_x
+            && pos.x <= self.ui.panel_x + self.ui.panel_width as i32
+            && pos.y >= self.ui.panel_y
+            && pos.y <= self.ui.panel_y + self.ui.panel_height as i32;
 
-        if inside != self.mouse_inside_panel {
-            self.mouse_inside_panel = inside;
-            if inside {
-                self.mpv.command(&["enable-section", "twitch_chat_mouse", "allow-hide-cursor"]);
-            } else {
-                self.mpv.command(&["disable-section", "twitch_chat_mouse"]);
+        if !inside {
+            // If clicked outside, close modal/drawers if open
+            if self.ui.current_view != UiView::Chat {
+                self.set_view(UiView::Chat);
             }
+            return;
+        }
+
+        self.handle_click(pos.x, pos.y);
+    }
+
+    fn on_wheel_event(&mut self, is_up: bool) {
+        let pos = if let Some(json) = self.mpv.get_property_string("mouse-pos") {
+            serde_json::from_str::<MousePos>(&json).unwrap_or_default()
+        } else {
+            return;
+        };
+
+        let inside = pos.x >= self.ui.panel_x
+            && pos.x <= self.ui.panel_x + self.ui.panel_width as i32
+            && pos.y >= self.ui.panel_y
+            && pos.y <= self.ui.panel_y + self.ui.panel_height as i32;
+
+        if !inside {
+            return;
+        }
+
+        match self.ui.current_view {
+            UiView::Chat => {
+                if is_up {
+                    self.ui.scroll_offset += 6;
+                } else {
+                    self.ui.scroll_offset = self.ui.scroll_offset.saturating_sub(6);
+                }
+                self.update_frame();
+            }
+            UiView::Search => {
+                if is_up {
+                    self.ui.search_scroll_offset = self.ui.search_scroll_offset.saturating_sub(1);
+                } else if self.ui.search_scroll_offset + 1 < self.ui.search_results.len() {
+                    self.ui.search_scroll_offset += 1;
+                }
+                self.update_frame();
+            }
+            UiView::Settings => {}
         }
     }
 
@@ -441,28 +481,6 @@ impl PluginState {
         }
     }
 
-    fn handle_wheel(&mut self, is_up: bool) {
-        match self.ui.current_view {
-            UiView::Chat => {
-                if is_up {
-                    self.ui.scroll_offset += 6;
-                } else {
-                    self.ui.scroll_offset = self.ui.scroll_offset.saturating_sub(6);
-                }
-                self.update_frame();
-            }
-            UiView::Search => {
-                if is_up {
-                    self.ui.search_scroll_offset = self.ui.search_scroll_offset.saturating_sub(1);
-                } else if self.ui.search_scroll_offset + 1 < self.ui.search_results.len() {
-                    self.ui.search_scroll_offset += 1;
-                }
-                self.update_frame();
-            }
-            UiView::Settings => {}
-        }
-    }
-
     fn update_frame(&mut self) {
         if !self.ui.chat_enabled {
             if self.overlay_active {
@@ -562,17 +580,15 @@ pub unsafe extern "C" fn mpv_open_cplugin(ctx: MpvHandleRaw) -> c_int {
         }
     };
 
-    // Observe essential playback and input properties
+    // Observe essential playback properties ONLY (DO NOT observe mouse-pos continuously!)
     mpv.observe_property(1, "time-pos", MpvFormat::Double);
     mpv.observe_property(2, "path", MpvFormat::String);
     mpv.observe_property(3, "pause", MpvFormat::Flag);
     mpv.observe_property(4, "vo-configured", MpvFormat::Flag);
-    mpv.observe_property(5, "mouse-pos", MpvFormat::String);
 
     let mut state = PluginState::new(mpv);
-    state.init_input_sections();
 
-    // Read initial script-opts (note: update_frame safely guards against premature vo calls)
+    // Read initial script-opts
     if let Some(opts) = state.mpv.get_property_string("script-opts") {
         state.parse_script_opts(&opts);
     }
@@ -621,15 +637,8 @@ pub unsafe extern "C" fn mpv_open_cplugin(ctx: MpvHandleRaw) -> c_int {
                                 state.overlay_active = false;
                             }
                         } else {
+                            state.init_bindings();
                             state.update_frame();
-                        }
-                    }
-                    5 => {
-                        // mouse-pos changed
-                        if let Some(json_pos) = state.mpv.get_property_string("mouse-pos") {
-                            if let Ok(pos) = serde_json::from_str::<MousePos>(&json_pos) {
-                                state.handle_mouse_move(pos.x, pos.y, pos.hover);
-                            }
                         }
                     }
                     _ => {}
@@ -638,6 +647,9 @@ pub unsafe extern "C" fn mpv_open_cplugin(ctx: MpvHandleRaw) -> c_int {
             MpvEventId::PlaybackRestart => {
                 state.playback_active = true;
                 state.vo_configured = is_vo_configured(&state.mpv);
+                if state.vo_configured {
+                    state.init_bindings();
+                }
                 if let Some(tp) = state.mpv.get_property_double("time-pos") {
                     state.current_time_pos = tp;
                 }
@@ -651,6 +663,9 @@ pub unsafe extern "C" fn mpv_open_cplugin(ctx: MpvHandleRaw) -> c_int {
             MpvEventId::FileLoaded => {
                 state.playback_active = true;
                 state.vo_configured = is_vo_configured(&state.mpv);
+                if state.vo_configured {
+                    state.init_bindings();
+                }
                 if let Some(p) = state.mpv.get_property_string("path") {
                     state.on_path_changed(&p);
                 }
@@ -694,13 +709,13 @@ pub unsafe extern "C" fn mpv_open_cplugin(ctx: MpvHandleRaw) -> c_int {
                                 }
                             }
                             "click" | "twitch_chat/click" => {
-                                state.handle_click(state.last_mouse_x, state.last_mouse_y);
+                                state.on_click_event();
                             }
                             "wheel_up" | "twitch_chat/wheel_up" => {
-                                state.handle_wheel(true);
+                                state.on_wheel_event(true);
                             }
                             "wheel_down" | "twitch_chat/wheel_down" => {
-                                state.handle_wheel(false);
+                                state.on_wheel_event(false);
                             }
                             "char" => {
                                 if let Some(ch) = args.get(1) {
