@@ -132,12 +132,13 @@ unsafe fn resolve_symbol<T>(symbol_name: &str) -> Option<T> {
     extern "system" {
         fn GetModuleHandleW(lpModuleName: *const u16) -> *mut c_void;
         fn GetProcAddress(hModule: *mut c_void, lpProcName: *const c_char) -> *mut c_void;
-        fn LoadLibraryW(lpLibFileName: *const u16) -> *mut c_void;
+        fn GetCurrentProcess() -> *mut c_void;
+        fn K32EnumProcessModules(hProcess: *mut c_void, lphModule: *mut *mut c_void, cb: u32, lpcbNeeded: *mut u32) -> i32;
     }
 
     let c_sym = CString::new(symbol_name).ok()?;
 
-    // Search in current process (.exe) first
+    // 1. Search in current process (.exe) first
     let h_exe = GetModuleHandleW(ptr::null());
     if !h_exe.is_null() {
         let p = GetProcAddress(h_exe, c_sym.as_ptr());
@@ -146,7 +147,7 @@ unsafe fn resolve_symbol<T>(symbol_name: &str) -> Option<T> {
         }
     }
 
-    // Try common mpv dll names if hosted as a library
+    // 2. Try common mpv dll names if hosted as a library
     for module_name in &[
         "mpv-2.dll", "libmpv-2.dll", "mpv-1.dll", "libmpv-1.dll", 
         "mpv.dll", "libmpv.dll", "mpvnet.exe", "mpv.exe"
@@ -160,6 +161,26 @@ unsafe fn resolve_symbol<T>(symbol_name: &str) -> Option<T> {
             let p = GetProcAddress(h_mod, c_sym.as_ptr());
             if !p.is_null() {
                 return Some(std::mem::transmute_copy(&p));
+            }
+        }
+    }
+
+    // 3. Fallback: enumerate all loaded modules in this process
+    let mut modules = [ptr::null_mut::<c_void>(); 256];
+    let mut cb_needed: u32 = 0;
+    if K32EnumProcessModules(
+        GetCurrentProcess(),
+        modules.as_mut_ptr(),
+        (modules.len() * std::mem::size_of::<*mut c_void>()) as u32,
+        &mut cb_needed,
+    ) != 0 {
+        let count = (cb_needed as usize / std::mem::size_of::<*mut c_void>()).min(modules.len());
+        for &h_mod in &modules[..count] {
+            if !h_mod.is_null() {
+                let p = GetProcAddress(h_mod, c_sym.as_ptr());
+                if !p.is_null() {
+                    return Some(std::mem::transmute_copy(&p));
+                }
             }
         }
     }
@@ -383,14 +404,6 @@ impl MpvHandle {
             (vt.command_string)(self.raw, c_cmd.as_ptr())
         }
     }
-
-pub fn log_plugin(msg: &str) {
-    let p = std::env::temp_dir().join("mpv_twitch_chat_rust.log");
-    use std::io::Write;
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
-        let _ = writeln!(f, "[TwitchChatRust] {}", msg);
-    }
-}
 
     /// Update overlay bitmap directly via mpv overlay-add using high-speed temp file
     pub fn overlay_add_bgra(
