@@ -97,16 +97,60 @@ pub struct MpvNodeList {
 }
 
 // Function pointer signatures for mpv C API
-type FnClientName = unsafe extern "C" fn(ctx: MpvHandleRaw) -> *const c_char;
-type FnWaitEvent = unsafe extern "C" fn(ctx: MpvHandleRaw, timeout: c_double) -> *mut MpvEvent;
-type FnCommand = unsafe extern "C" fn(ctx: MpvHandleRaw, args: *mut *const c_char) -> c_int;
-type FnCommandString = unsafe extern "C" fn(ctx: MpvHandleRaw, args: *const c_char) -> c_int;
-type FnObserveProperty = unsafe extern "C" fn(ctx: MpvHandleRaw, reply_userdata: u64, name: *const c_char, format: MpvFormat) -> c_int;
-type FnSetProperty = unsafe extern "C" fn(ctx: MpvHandleRaw, name: *const c_char, format: MpvFormat, data: *mut c_void) -> c_int;
-type FnSetPropertyString = unsafe extern "C" fn(ctx: MpvHandleRaw, name: *const c_char, data: *const c_char) -> c_int;
-type FnGetProperty = unsafe extern "C" fn(ctx: MpvHandleRaw, name: *const c_char, format: MpvFormat, data: *mut c_void) -> c_int;
-type FnGetPropertyString = unsafe extern "C" fn(ctx: MpvHandleRaw, name: *const c_char) -> *mut c_char;
-type FnFree = unsafe extern "C" fn(data: *mut c_void);
+pub type FnClientName = unsafe extern "C" fn(ctx: MpvHandleRaw) -> *const c_char;
+pub type FnWaitEvent = unsafe extern "C" fn(ctx: MpvHandleRaw, timeout: c_double) -> *mut MpvEvent;
+pub type FnCommand = unsafe extern "C" fn(ctx: MpvHandleRaw, args: *mut *const c_char) -> c_int;
+pub type FnCommandString = unsafe extern "C" fn(ctx: MpvHandleRaw, args: *const c_char) -> c_int;
+pub type FnObserveProperty = unsafe extern "C" fn(ctx: MpvHandleRaw, reply_userdata: u64, name: *const c_char, format: MpvFormat) -> c_int;
+pub type FnSetProperty = unsafe extern "C" fn(ctx: MpvHandleRaw, name: *const c_char, format: MpvFormat, data: *mut c_void) -> c_int;
+pub type FnSetPropertyString = unsafe extern "C" fn(ctx: MpvHandleRaw, name: *const c_char, data: *const c_char) -> c_int;
+pub type FnGetProperty = unsafe extern "C" fn(ctx: MpvHandleRaw, name: *const c_char, format: MpvFormat, data: *mut c_void) -> c_int;
+pub type FnGetPropertyString = unsafe extern "C" fn(ctx: MpvHandleRaw, name: *const c_char) -> *mut c_char;
+pub type FnFree = unsafe extern "C" fn(data: *mut c_void);
+
+// Exported symbols matching mpv's MPV_CPLUGIN_DYNAMIC_SYM ABI
+// mpv's Windows C-plugin loader uses GetProcAddress(dll, "pfn_mpv_...") and populates these before calling mpv_open_cplugin.
+#[no_mangle] pub static mut pfn_mpv_client_name: Option<FnClientName> = None;
+#[no_mangle] pub static mut pfn_mpv_wait_event: Option<FnWaitEvent> = None;
+#[no_mangle] pub static mut pfn_mpv_command: Option<FnCommand> = None;
+#[no_mangle] pub static mut pfn_mpv_command_string: Option<FnCommandString> = None;
+#[no_mangle] pub static mut pfn_mpv_observe_property: Option<FnObserveProperty> = None;
+#[no_mangle] pub static mut pfn_mpv_set_property: Option<FnSetProperty> = None;
+#[no_mangle] pub static mut pfn_mpv_set_property_string: Option<FnSetPropertyString> = None;
+#[no_mangle] pub static mut pfn_mpv_get_property: Option<FnGetProperty> = None;
+#[no_mangle] pub static mut pfn_mpv_get_property_string: Option<FnGetPropertyString> = None;
+#[no_mangle] pub static mut pfn_mpv_free: Option<FnFree> = None;
+
+// Additional exported placeholder pointers that mpv may attempt to populate
+#[no_mangle] pub static mut pfn_mpv_client_api_version: *mut c_void = ptr::null_mut();
+#[no_mangle] pub static mut pfn_mpv_error_string: *mut c_void = ptr::null_mut();
+#[no_mangle] pub static mut pfn_mpv_create: *mut c_void = ptr::null_mut();
+#[no_mangle] pub static mut pfn_mpv_initialize: *mut c_void = ptr::null_mut();
+#[no_mangle] pub static mut pfn_mpv_destroy: *mut c_void = ptr::null_mut();
+#[no_mangle] pub static mut pfn_mpv_terminate_destroy: *mut c_void = ptr::null_mut();
+#[no_mangle] pub static mut pfn_mpv_create_client: *mut c_void = ptr::null_mut();
+#[no_mangle] pub static mut pfn_mpv_create_weak_client: *mut c_void = ptr::null_mut();
+#[no_mangle] pub static mut pfn_mpv_load_config_file: *mut c_void = ptr::null_mut();
+#[no_mangle] pub static mut pfn_mpv_get_time_us: *mut c_void = ptr::null_mut();
+#[no_mangle] pub static mut pfn_mpv_request_event: *mut c_void = ptr::null_mut();
+#[no_mangle] pub static mut pfn_mpv_request_log_messages: *mut c_void = ptr::null_mut();
+#[no_mangle] pub static mut pfn_mpv_wakeup: *mut c_void = ptr::null_mut();
+#[no_mangle] pub static mut pfn_mpv_set_wakeup_callback: *mut c_void = ptr::null_mut();
+#[no_mangle] pub static mut pfn_mpv_wait_async_requests: *mut c_void = ptr::null_mut();
+#[no_mangle] pub static mut pfn_mpv_hook_add: *mut c_void = ptr::null_mut();
+#[no_mangle] pub static mut pfn_mpv_hook_continue: *mut c_void = ptr::null_mut();
+#[no_mangle] pub static mut pfn_mpv_get_property_osd_string: *mut c_void = ptr::null_mut();
+#[no_mangle] pub static mut pfn_mpv_set_property_async: *mut c_void = ptr::null_mut();
+#[no_mangle] pub static mut pfn_mpv_get_property_async: *mut c_void = ptr::null_mut();
+#[no_mangle] pub static mut pfn_mpv_unobserve_property: *mut c_void = ptr::null_mut();
+#[no_mangle] pub static mut pfn_mpv_command_slice: *mut c_void = ptr::null_mut();
+#[no_mangle] pub static mut pfn_mpv_command_async: *mut c_void = ptr::null_mut();
+#[no_mangle] pub static mut pfn_mpv_command_node: *mut c_void = ptr::null_mut();
+#[no_mangle] pub static mut pfn_mpv_command_node_async: *mut c_void = ptr::null_mut();
+#[no_mangle] pub static mut pfn_mpv_abort_async_command: *mut c_void = ptr::null_mut();
+#[no_mangle] pub static mut pfn_mpv_set_option: *mut c_void = ptr::null_mut();
+#[no_mangle] pub static mut pfn_mpv_set_option_string: *mut c_void = ptr::null_mut();
+#[no_mangle] pub static mut pfn_mpv_free_node_contents: *mut c_void = ptr::null_mut();
 
 struct MpvVTable {
     client_name: FnClientName,
@@ -198,70 +242,70 @@ pub unsafe fn init_vtable() -> bool {
         return true;
     }
 
-    let client_name = match resolve_symbol::<FnClientName>("mpv_client_name") {
+    let client_name = match pfn_mpv_client_name.or_else(|| resolve_symbol::<FnClientName>("mpv_client_name")) {
         Some(f) => f,
         None => {
-            log_plugin("init_vtable: failed to resolve mpv_client_name");
+            log_plugin("init_vtable: failed to resolve mpv_client_name (neither dynamic sym nor GetProcAddress)");
             return false;
         }
     };
-    let wait_event = match resolve_symbol::<FnWaitEvent>("mpv_wait_event") {
+    let wait_event = match pfn_mpv_wait_event.or_else(|| resolve_symbol::<FnWaitEvent>("mpv_wait_event")) {
         Some(f) => f,
         None => {
             log_plugin("init_vtable: failed to resolve mpv_wait_event");
             return false;
         }
     };
-    let command = match resolve_symbol::<FnCommand>("mpv_command") {
+    let command = match pfn_mpv_command.or_else(|| resolve_symbol::<FnCommand>("mpv_command")) {
         Some(f) => f,
         None => {
             log_plugin("init_vtable: failed to resolve mpv_command");
             return false;
         }
     };
-    let command_string = match resolve_symbol::<FnCommandString>("mpv_command_string") {
+    let command_string = match pfn_mpv_command_string.or_else(|| resolve_symbol::<FnCommandString>("mpv_command_string")) {
         Some(f) => f,
         None => {
             log_plugin("init_vtable: failed to resolve mpv_command_string");
             return false;
         }
     };
-    let observe_property = match resolve_symbol::<FnObserveProperty>("mpv_observe_property") {
+    let observe_property = match pfn_mpv_observe_property.or_else(|| resolve_symbol::<FnObserveProperty>("mpv_observe_property")) {
         Some(f) => f,
         None => {
             log_plugin("init_vtable: failed to resolve mpv_observe_property");
             return false;
         }
     };
-    let set_property = match resolve_symbol::<FnSetProperty>("mpv_set_property") {
+    let set_property = match pfn_mpv_set_property.or_else(|| resolve_symbol::<FnSetProperty>("mpv_set_property")) {
         Some(f) => f,
         None => {
             log_plugin("init_vtable: failed to resolve mpv_set_property");
             return false;
         }
     };
-    let set_property_string = match resolve_symbol::<FnSetPropertyString>("mpv_set_property_string") {
+    let set_property_string = match pfn_mpv_set_property_string.or_else(|| resolve_symbol::<FnSetPropertyString>("mpv_set_property_string")) {
         Some(f) => f,
         None => {
             log_plugin("init_vtable: failed to resolve mpv_set_property_string");
             return false;
         }
     };
-    let get_property = match resolve_symbol::<FnGetProperty>("mpv_get_property") {
+    let get_property = match pfn_mpv_get_property.or_else(|| resolve_symbol::<FnGetProperty>("mpv_get_property")) {
         Some(f) => f,
         None => {
             log_plugin("init_vtable: failed to resolve mpv_get_property");
             return false;
         }
     };
-    let get_property_string = match resolve_symbol::<FnGetPropertyString>("mpv_get_property_string") {
+    let get_property_string = match pfn_mpv_get_property_string.or_else(|| resolve_symbol::<FnGetPropertyString>("mpv_get_property_string")) {
         Some(f) => f,
         None => {
             log_plugin("init_vtable: failed to resolve mpv_get_property_string");
             return false;
         }
     };
-    let free = match resolve_symbol::<FnFree>("mpv_free") {
+    let free = match pfn_mpv_free.or_else(|| resolve_symbol::<FnFree>("mpv_free")) {
         Some(f) => f,
         None => {
             log_plugin("init_vtable: failed to resolve mpv_free");
@@ -269,6 +313,7 @@ pub unsafe fn init_vtable() -> bool {
         }
     };
 
+    log_plugin("init_vtable: all mpv API symbols successfully bound!");
     VTABLE = Some(MpvVTable {
         client_name,
         wait_event,
