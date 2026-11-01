@@ -626,25 +626,21 @@ impl ChatRenderer {
 
                     if px >= 0 && px < pw && py >= 0 && py < ph {
                         let idx = (py as usize * pw as usize + px as usize) * 4;
-                        let src_a = (alpha_val as f32 / 255.0) * (color[3] as f32 / 255.0);
-                        let dst_a = pixels[idx + 3] as f32 / 255.0;
+                        let cov = alpha_val as f32 / 255.0;
+                        let src_a = cov * (color[3] as f32 / 255.0);
+                        let inv_a = 1.0 - src_a;
 
-                        let out_a = src_a + dst_a * (1.0 - src_a);
-                        if out_a > 0.0 {
-                            pixels[idx + 0] = (((color[0] as f32 * src_a)
-                                + (pixels[idx + 0] as f32 * (1.0 - src_a)))
-                                / out_a)
-                                .min(255.0) as u8;
-                            pixels[idx + 1] = (((color[1] as f32 * src_a)
-                                + (pixels[idx + 1] as f32 * (1.0 - src_a)))
-                                / out_a)
-                                .min(255.0) as u8;
-                            pixels[idx + 2] = (((color[2] as f32 * src_a)
-                                + (pixels[idx + 2] as f32 * (1.0 - src_a)))
-                                / out_a)
-                                .min(255.0) as u8;
-                            pixels[idx + 3] = (out_a * 255.0).min(255.0) as u8;
-                        }
+                        // tiny-skia and mpv overlays use premultiplied BGRA:
+                        // out = src_premul + dst_premul * (1 - src_a)
+                        let r = (color[0] as f32 * src_a) + (pixels[idx + 0] as f32 * inv_a);
+                        let g = (color[1] as f32 * src_a) + (pixels[idx + 1] as f32 * inv_a);
+                        let b = (color[2] as f32 * src_a) + (pixels[idx + 2] as f32 * inv_a);
+                        let a = (color[3] as f32 * cov) + (pixels[idx + 3] as f32 * inv_a);
+
+                        pixels[idx + 0] = (r + 0.5).min(255.0) as u8;
+                        pixels[idx + 1] = (g + 0.5).min(255.0) as u8;
+                        pixels[idx + 2] = (b + 0.5).min(255.0) as u8;
+                        pixels[idx + 3] = (a + 0.5).min(255.0) as u8;
                     }
                 }
             }
