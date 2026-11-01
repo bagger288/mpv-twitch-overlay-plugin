@@ -313,95 +313,20 @@ impl SessionManager {
         })
     }
 
-    /// Finds index range of messages up to `current_ms`
-    pub fn get_messages_up_to(&self, current_ms: i64, max_count: usize) -> &[ChatMessage] {
+    /// Finds index range of messages up to `current_ms`, shifted backwards by `scroll_offset`
+    pub fn get_messages_up_to(&self, current_ms: i64, scroll_offset: usize, max_count: usize) -> &[ChatMessage] {
         if self.messages.is_empty() {
             return &[];
         }
 
-        let idx = match self.messages.binary_search_by_key(&current_ms, |m| m.timestamp_ms) {
+        let last_idx = match self.messages.binary_search_by_key(&current_ms, |m| m.timestamp_ms) {
             Ok(i) => i + 1,
             Err(i) => i,
         };
 
-        let start = idx.saturating_sub(max_count);
-        &self.messages[start..idx]
-    }
-
-    /// Returns messages visible at `current_ms` with an optional scroll offset.
-    ///
-    /// Mirrors the Lua original's `eff_idx` logic:
-    ///   eff_idx = clamp(last_idx - scroll_offset, 1, #chat_events)
-    /// where `last_idx` is the index of the first message with `ts > current_ms`.
-    ///
-    /// - `scroll_offset == 0`  → live (auto-scroll to newest messages up to current time)
-    /// - `scroll_offset > 0`  → scrolled back into the past (older messages)
-    /// - `scroll_offset < 0`  → scrolled forward into the future (newer messages)
-    pub fn get_messages_scrolled(
-        &self,
-        current_ms: i64,
-        scroll_offset: i64,
-        max_count: usize,
-    ) -> &[ChatMessage] {
-        if self.messages.is_empty() {
-            return &[];
-        }
-
-        // Binary search: index of first message with timestamp > current_ms
-        let last_idx = match self.messages.binary_search_by_key(&current_ms, |m| m.timestamp_ms) {
-            Ok(mut i) => {
-                // Skip duplicates equal to current_ms so last_idx points strictly after
-                i += 1;
-                while i < self.messages.len() && self.messages[i].timestamp_ms <= current_ms {
-                    i += 1;
-                }
-                i
-            }
-            Err(i) => i,
-        };
-
-        if last_idx == 0 && scroll_offset >= 0 {
-            return &[];
-        }
-
-        let len_i64 = self.messages.len() as i64;
-
-        // Apply scroll offset (positive => back in time, negative => forward in time)
-        let mut eff_idx = last_idx as i64 - scroll_offset;
-        if eff_idx < 1 {
-            eff_idx = 1;
-        }
-        if eff_idx > len_i64 {
-            eff_idx = len_i64;
-        }
-
-        let end = eff_idx as usize;
-        let start = end.saturating_sub(max_count);
-        &self.messages[start..end]
-    }
-
-    /// Returns (max_back, max_forward) scroll bounds at `current_ms`, mirroring the Lua clamp:
-    ///   max_back    = last_idx - 1
-    ///   max_forward = -(len - last_idx)
-    pub fn scroll_bounds_at(&self, current_ms: i64) -> (i64, i64) {
-        if self.messages.is_empty() {
-            return (0, 0);
-        }
-
-        let last_idx = match self.messages.binary_search_by_key(&current_ms, |m| m.timestamp_ms) {
-            Ok(mut i) => {
-                i += 1;
-                while i < self.messages.len() && self.messages[i].timestamp_ms <= current_ms {
-                    i += 1;
-                }
-                i
-            }
-            Err(i) => i,
-        };
-
-        let max_back = (last_idx as i64 - 1).max(0);
-        let max_forward = -(self.messages.len() as i64 - last_idx as i64);
-        (max_back, max_forward)
+        let eff_idx = last_idx.saturating_sub(scroll_offset).min(self.messages.len());
+        let start = eff_idx.saturating_sub(max_count);
+        &self.messages[start..eff_idx]
     }
 
     /// 1-Click Sync anchor: updates session_start_ms in memory and on disk

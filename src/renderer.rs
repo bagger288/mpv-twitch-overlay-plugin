@@ -174,7 +174,8 @@ impl ChatRenderer {
         let width = ui.panel_width as f32;
         let height = ui.panel_height as f32;
         let visible_top = 32.0;
-        let visible_bottom = height - 4.0;
+        let ban_h = if ui.scroll_offset > 0 { 28.0 } else { 0.0 };
+        let visible_bottom = height - ban_h - 4.0;
 
         if messages.is_empty() {
             self.draw_text(
@@ -188,9 +189,18 @@ impl ChatRenderer {
             return;
         }
 
+        // Pin the newest message to the bottom of the visible chat container
+        let total_msg_h = messages.last().map(|m| m.bottom_y).unwrap_or(0.0);
+        let available_h = visible_bottom - visible_top;
+        let base_y = if total_msg_h > available_h {
+            visible_top + (available_h - total_msg_h)
+        } else {
+            visible_top + 4.0
+        };
+
         for msg in messages {
-            let shifted_top = visible_top + msg.top_y;
-            let shifted_bottom = visible_top + msg.bottom_y;
+            let shifted_top = base_y + msg.top_y;
+            let shifted_bottom = base_y + msg.bottom_y;
 
             if shifted_bottom < visible_top || shifted_top > visible_bottom {
                 continue;
@@ -199,7 +209,7 @@ impl ChatRenderer {
             for token in &msg.tokens {
                 match token {
                     LayoutToken::Text { text, color, x, y } => {
-                        let render_y = visible_top + y;
+                        let render_y = base_y + y;
                         if render_y + 16.0 >= visible_top && render_y <= visible_bottom {
                             self.draw_text(pixmap, text, *x, render_y, ui.font_size, *color);
                         }
@@ -211,7 +221,7 @@ impl ChatRenderer {
                         width: _iw,
                         height: ih,
                     } => {
-                        let render_y = visible_top + y;
+                        let render_y = base_y + y;
                         if render_y + *ih as f32 >= visible_top && render_y <= visible_bottom {
                             if let Some(emote_px) = emotes.get_or_load(path, *ih) {
                                 pixmap.draw_pixmap(
@@ -229,22 +239,23 @@ impl ChatRenderer {
             }
         }
 
-        // If scrolled away from live (either direction), render banner at bottom
-        if ui.scroll_offset != 0 {
-            let ban_h = 24.0;
-            let ban_y = height - ban_h - 4.0;
+        // If scrolled back in history, render banner at bottom
+        if ui.scroll_offset > 0 {
+            let ban_y = height - 26.0;
             let mut ban_paint = Paint::default();
             ban_paint.set_color_rgba8(37, 24, 56, 240);
-            if let Some(r) = Rect::from_xywh(4.0, ban_y, width - 8.0, ban_h) {
+            if let Some(r) = Rect::from_xywh(4.0, ban_y, width - 8.0, 24.0) {
                 pixmap.fill_rect(r, &ban_paint, Transform::identity(), None);
             }
 
-            // Mirrors Lua: positive offset = scrolled back, negative = scrolled forward.
-            let msg_text = if ui.scroll_offset > 0 {
-                format!("⬇ Чат: назад (-{}) | Клик: к live", ui.scroll_offset)
-            } else {
-                format!("⬆ Чат: вперёд (+{}) | Клик: к live", -ui.scroll_offset)
-            };
+            // Top highlight border on banner
+            let mut b_paint = Paint::default();
+            b_paint.set_color_rgba8(145, 71, 255, 255);
+            if let Some(r) = Rect::from_xywh(4.0, ban_y, width - 8.0, 1.0) {
+                pixmap.fill_rect(r, &b_paint, Transform::identity(), None);
+            }
+
+            let msg_text = format!("⬇ Чат: назад (-{}) | Клик: к live", ui.scroll_offset);
             self.draw_text(pixmap, &msg_text, 14.0, ban_y + 5.0, 11.0, [0, 255, 230, 255]);
         }
     }
@@ -435,7 +446,7 @@ impl ChatRenderer {
         let height = ui.panel_height as f32;
         let mut cur_y = 36.0;
 
-        // Search bar box
+        // Search bar box with active glowing border
         let sb_w = width - 24.0;
         let sb_h = 28.0;
         let mut sbar_paint = Paint::default();
@@ -443,14 +454,24 @@ impl ChatRenderer {
         if let Some(r) = Rect::from_xywh(12.0, cur_y, sb_w, sb_h) {
             pixmap.fill_rect(r, &sbar_paint, Transform::identity(), None);
         }
+        let mut sborder_paint = Paint::default();
+        sborder_paint.set_color_rgba8(145, 71, 255, 255);
+        if let Some(r) = Rect::from_xywh(12.0, cur_y + sb_h - 2.0, sb_w, 2.0) {
+            pixmap.fill_rect(r, &sborder_paint, Transform::identity(), None);
+        }
 
+        let blink = (std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() / 500) % 2 == 0;
+        let cursor_char = if blink { "|" } else { " " };
         let q_display = if ui.search_query.is_empty() {
-            "Поиск по автору или тексту (начните вводить)...".to_string()
+            format!("Поиск сообщения или ника{}", cursor_char)
         } else {
-            format!("{}_", ui.search_query)
+            format!("{}{}", ui.search_query, cursor_char)
         };
         let q_color = if ui.search_query.is_empty() {
-            [130, 130, 150, 255]
+            [160, 160, 180, 255]
         } else {
             [255, 255, 255, 255]
         };

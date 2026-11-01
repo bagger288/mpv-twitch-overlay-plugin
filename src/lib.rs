@@ -16,21 +16,10 @@ pub mod ui;
 use emotes::EmoteCache;
 use mpv_api::{log_plugin, MpvEventClientMessage, MpvEventId, MpvFormat, MpvHandle, MpvHandleRaw};
 use renderer::ChatRenderer;
-use session::SessionManager;
+use session::{swap_keyboard_layout, SessionManager};
 use std::os::raw::c_int;
 use std::path::PathBuf;
-use ui::{HitBox, SearchResult, UiState, UiView};
-
-/// UTF-8-safe removal of the last character of `s` (mirrors Lua's `utf8_pop_last_char`).
-/// Used by the search input backspace handler.
-fn pop_last_char(s: &str) -> String {
-    if s.is_empty() {
-        return String::new();
-    }
-    let mut chars = s.chars();
-    chars.next_back();
-    chars.as_str().to_string()
-}
+use ui::{HitBox, UiState, UiView};
 
 // mpv overlay ID must be in the range [0..63].
 // ID 1 is safe, valid, and avoids thumbfast.lua's default ID 42.
@@ -102,6 +91,54 @@ fn get_client_cursor_pos(_mpv: &MpvHandle) -> Option<(i32, i32)> {
     None
 }
 
+/// Builds keybindings string for the search input section in mpv
+fn build_search_section_string() -> String {
+    let mut s = String::with_capacity(4096);
+
+    // Latin letters a-z and A-Z
+    for b in b'a'..=b'z' {
+        let ch = b as char;
+        let up = ch.to_ascii_uppercase();
+        s.push_str(&format!("{ch} script-message-to twitch_chat sk {ch}\n"));
+        s.push_str(&format!("Shift+{ch} script-message-to twitch_chat sk {up}\n"));
+    }
+
+    // Digits 0-9
+    for d in b'0'..=b'9' {
+        let dh = d as char;
+        s.push_str(&format!("{dh} script-message-to twitch_chat sk {dh}\n"));
+    }
+
+    // Printable symbols
+    s.push_str("SPACE script-message-to twitch_chat sk_space\n");
+    s.push_str("- script-message-to twitch_chat sk -\n");
+    s.push_str("_ script-message-to twitch_chat sk _\n");
+    s.push_str(". script-message-to twitch_chat sk .\n");
+    s.push_str(", script-message-to twitch_chat sk ,\n");
+    s.push_str("! script-message-to twitch_chat sk !\n");
+    s.push_str("? script-message-to twitch_chat sk ?\n");
+    s.push_str("/ script-message-to twitch_chat sk /\n");
+    s.push_str("@ script-message-to twitch_chat sk @\n");
+    s.push_str("# script-message-to twitch_chat sk #\n");
+    s.push_str(": script-message-to twitch_chat sk :\n");
+
+    // Cyrillic letters (Russian lowercase & uppercase)
+    const CYR_LOWER: &str = "абвгдеёжзийклмнопрстуфхцчшщъыьэюя";
+    const CYR_UPPER: &str = "АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ";
+    for (low, up) in CYR_LOWER.chars().zip(CYR_UPPER.chars()) {
+        s.push_str(&format!("{low} script-message-to twitch_chat sk {low}\n"));
+        s.push_str(&format!("{up} script-message-to twitch_chat sk {up}\n"));
+        s.push_str(&format!("Shift+{low} script-message-to twitch_chat sk {up}\n"));
+    }
+
+    // Control keys
+    s.push_str("BS script-message-to twitch_chat sk_bs\n");
+    s.push_str("ESC script-message-to twitch_chat sk_esc\n");
+    s.push_str("ENTER script-message-to twitch_chat sk_enter\n");
+
+    s
+}
+
 struct PluginState {
     mpv: MpvHandle,
     session: Option<SessionManager>,
@@ -115,6 +152,8 @@ struct PluginState {
     overlay_active: bool,
     mouse_section_defined: bool,
     mouse_section_enabled: bool,
+    search_section_defined: bool,
+    search_section_enabled: bool,
 }
 
 impl PluginState {
@@ -132,6 +171,8 @@ impl PluginState {
             overlay_active: false,
             mouse_section_defined: false,
             mouse_section_enabled: false,
+            search_section_defined: false,
+            search_section_enabled: false,
         }
     }
 
@@ -146,6 +187,33 @@ impl PluginState {
             self.mpv.command(&["disable-section", "twitch_chat_mouse"]);
             self.mouse_section_defined = true;
             self.mouse_section_enabled = false;
+        }
+    }
+
+    fn init_search_section(&mut self) {
+        if !self.search_section_defined {
+            let section_str = build_search_section_string();
+            self.mpv.command(&[
+                "define-section",
+                "twitch_chat_search",
+                &section_str,
+                "force",
+            ]);
+            self.mpv.command(&["disable-section", "twitch_chat_search"]);
+            self.search_section_defined = true;
+            self.search_section_enabled = false;
+        }
+    }
+
+    fn update_search_keys_state(&mut self) {
+        self.init_search_section();
+        let should_enable = self.ui.chat_enabled && self.ui.current_view == UiView::Search;
+        if should_enable && !self.search_section_enabled {
+            self.mpv.command(&["enable-section", "twitch_chat_search", "force"]);
+            self.search_section_enabled = true;
+        } else if !should_enable && self.search_section_enabled {
+            self.mpv.command(&["disable-section", "twitch_chat_search"]);
+            self.search_section_enabled = false;
         }
     }
 
@@ -178,44 +246,17 @@ impl PluginState {
         }
     }
 
-    /// Clamp `scroll_offset` to the same bounds the Lua script uses:
-    ///   max_back    = last_idx - 1
-    ///   max_forward = -(len - last_idx)
-    fn clamp_scroll_offset(&mut self) {
-        // Read everything we need from `self` first, then release the immutable
-        // borrows before writing back to `self.ui.scroll_offset`.
-        let (max_back, max_forward) = if let Some(session) = &self.session {
-            let session_start = session.session_data.session_start_ms;
-            let current_ms = session_start
-                + self.ui.offset_ms
-                + (self.current_time_pos * 1000.0).round() as i64;
-            session.scroll_bounds_at(current_ms)
-        } else {
-            return;
-        };
-        if self.ui.scroll_offset > max_back {
-            self.ui.scroll_offset = max_back;
-        }
-        if self.ui.scroll_offset < max_forward {
-            self.ui.scroll_offset = max_forward;
-        }
-    }
-
-    /// Re-runs the chat search with the current query and refreshes the overlay.
     fn perform_search(&mut self) {
-        // Snapshot query/offset into locals so the immutable borrow of
-        // `self.session` is released before we write `self.ui.search_results`.
-        let query = self.ui.search_query.clone();
-        let offset = self.ui.offset_ms;
-        let new_results: Vec<SearchResult> = if let Some(session) = &self.session {
+        if let Some(session) = &self.session {
             let session_start = session.session_data.session_start_ms;
-            session.search_messages(&query, session_start, offset, 200)
-        } else {
-            Vec::new()
-        };
-        self.ui.search_results = new_results;
-        self.ui.search_scroll_offset = 0;
-        self.update_frame();
+            self.ui.search_results = session.search_messages(
+                &self.ui.search_query,
+                session_start,
+                self.ui.offset_ms,
+                50,
+            );
+            self.ui.search_scroll_offset = 0;
+        }
     }
 
     fn on_click_event(&mut self) {
@@ -243,22 +284,21 @@ impl PluginState {
 
         // 1. Header Tabs & Buttons
         if ChatRenderer::btn_tab_chat().contains(rel_x, rel_y) {
-            log_plugin("on_click_event: clicked [Chat] tab");
             self.ui.current_view = UiView::Chat;
+            self.update_search_keys_state();
             self.update_frame();
             return;
         }
         if ChatRenderer::btn_tab_search().contains(rel_x, rel_y) {
-            log_plugin("on_click_event: clicked [Search] tab — switching view to Search");
             self.ui.current_view = UiView::Search;
-            log_plugin("on_click_event: calling update_frame to sync view property...");
+            self.perform_search();
+            self.update_search_keys_state();
             self.update_frame();
-            log_plugin("on_click_event: update_frame returned, Search view active");
             return;
         }
         if ChatRenderer::btn_tab_settings().contains(rel_x, rel_y) {
-            log_plugin("on_click_event: clicked [Settings] tab");
             self.ui.current_view = UiView::Settings;
+            self.update_search_keys_state();
             self.update_frame();
             return;
         }
@@ -272,37 +312,69 @@ impl PluginState {
                 self.mpv.command(&["disable-section", "twitch_chat_mouse"]);
                 self.mouse_section_enabled = false;
             }
+            self.update_search_keys_state();
             return;
         }
 
         // 2. View specific clicks
         match self.ui.current_view {
             UiView::Chat => {
-                // If scrolled (either direction), clicking near bottom banner returns to live
-                if self.ui.scroll_offset != 0 && rel_y >= self.ui.panel_height as f32 - 32.0 {
+                let height = self.ui.panel_height as f32;
+                // If scrolled, clicking bottom banner returns to live
+                if self.ui.scroll_offset > 0 && rel_y >= height - 32.0 {
                     self.ui.scroll_offset = 0;
                     self.update_frame();
                     return;
                 }
 
-                // Click on a message to select it as sync anchor
-                let content_y = rel_y - 30.0;
-                if content_y > 0.0 {
-                    let line_h = (self.ui.font_size * 1.45).round();
-                    let clicked_idx = (content_y / line_h) as usize;
-                    if let Some(session) = &self.session {
-                        let current_video_sec = self.current_time_pos;
-                        let session_start = session.session_data.session_start_ms;
-                        let current_ms = session_start
-                            + self.ui.offset_ms
-                            + (current_video_sec * 1000.0).round() as i64;
-                        // Use the scrolled view so clicks land on the right message
-                        // when the user has scrolled back into history.
-                        let active_msgs =
-                            session.get_messages_scrolled(current_ms, self.ui.scroll_offset, 80);
-                        if clicked_idx < active_msgs.len() {
-                            self.ui.selected_sync_msg = Some(active_msgs[clicked_idx].clone());
+                // Hit-test messages and jump to clicked message timestamp
+                let session = match self.session.as_ref() {
+                    Some(s) => s,
+                    None => return,
+                };
+
+                let current_video_sec = self.current_time_pos;
+                let session_start = session.session_data.session_start_ms;
+                let current_ms = session_start
+                    + self.ui.offset_ms
+                    + (current_video_sec * 1000.0).round() as i64;
+                let active_msgs = session.get_messages_up_to(current_ms, self.ui.scroll_offset, 80);
+
+                let line_height = (self.ui.font_size * 1.45).round();
+                let emote_size = (self.ui.font_size * 1.3).round() as u32;
+
+                let layout_messages = self.renderer.layouter().layout_messages(
+                    active_msgs,
+                    &session.emotes_manifest,
+                    self.ui.panel_width as f32,
+                    self.ui.font_size,
+                    line_height,
+                    emote_size,
+                );
+
+                let visible_top = 32.0;
+                let ban_h = if self.ui.scroll_offset > 0 { 28.0 } else { 0.0 };
+                let visible_bottom = height - ban_h - 4.0;
+                let total_msg_h = layout_messages.last().map(|m| m.bottom_y).unwrap_or(0.0);
+                let available_h = visible_bottom - visible_top;
+                let base_y = if total_msg_h > available_h {
+                    visible_top + (available_h - total_msg_h)
+                } else {
+                    visible_top + 4.0
+                };
+
+                for msg in &layout_messages {
+                    let msg_top = base_y + msg.top_y;
+                    let msg_bottom = base_y + msg.bottom_y;
+
+                    if rel_y >= msg_top && rel_y <= msg_bottom {
+                        if msg.msg_index < active_msgs.len() {
+                            let clicked_msg = &active_msgs[msg.msg_index];
+                            self.ui.selected_sync_msg = Some(clicked_msg.clone());
+                            let seek_sec = ((clicked_msg.timestamp_ms - session_start - self.ui.offset_ms) as f64 / 1000.0).max(0.0);
+                            self.mpv.seek_absolute(seek_sec);
                             self.update_frame();
+                            return;
                         }
                     }
                 }
@@ -451,63 +523,42 @@ impl PluginState {
         let width = self.ui.panel_width as f32;
         let height = self.ui.panel_height as f32;
 
-        // Layout must mirror render_search_view() in renderer.rs exactly:
-        //   search bar: y=36..64  (height 28)
-        //   action row: y=72..94  (height 22)
-        //   results:    y=102..
-        let sb_y = 36.0;
-        let sb_h = 28.0;
-        let action_y = sb_y + sb_h + 8.0; // = 72
-        let action_h = 22.0;
-        let results_y = action_y + 30.0; // = 102
-        let item_h = 36.0;
-
-        // 1. Click on the search input field itself — input is handled by the
-        //    Lua helper script (twitch_chat_keys.lua) which dynamically
-        //    enables/disables key bindings based on view state.
-        //    Here we just absorb the click to avoid falling through to a result row.
-        if ry >= sb_y && ry <= sb_y + sb_h && rx >= 12.0 && rx <= width - 12.0 {
+        // 1. Action Buttons: [RU ⇄ EN], [⌫ Стереть], [🗑 Очистить] at y=72.0
+        let btn_y = 72.0;
+        if HitBox::new(12.0, btn_y, 76.0, 22.0).contains(rx, ry) {
+            self.ui.search_query = swap_keyboard_layout(&self.ui.search_query);
+            self.perform_search();
+            self.update_frame();
             return;
         }
-
-        // 2. Action buttons row
-        // [ RU ⇄ EN ] at (12, action_y, 76, 22)
-        if HitBox::new(12.0, action_y, 76.0, action_h).contains(rx, ry) {
-            if !self.ui.search_query.is_empty() {
-                self.ui.search_query =
-                    session::swap_keyboard_layout(&self.ui.search_query);
-                self.perform_search();
-            }
+        if HitBox::new(94.0, btn_y, 76.0, 22.0).contains(rx, ry) {
+            self.ui.search_query.pop();
+            self.perform_search();
+            self.update_frame();
             return;
         }
-        // [ ⌫ Стереть ] at (94, action_y, 76, 22) — backspace one char
-        if HitBox::new(94.0, action_y, 76.0, action_h).contains(rx, ry) {
-            if !self.ui.search_query.is_empty() {
-                self.ui.search_query = pop_last_char(&self.ui.search_query);
-                self.perform_search();
-            }
-            return;
-        }
-        // [ 🗑 Очистить ] at (176, action_y, 76, 22) — clear whole query
-        if HitBox::new(176.0, action_y, 76.0, action_h).contains(rx, ry) {
+        if HitBox::new(176.0, btn_y, 76.0, 22.0).contains(rx, ry) {
             self.ui.search_query.clear();
             self.ui.search_results.clear();
-            self.ui.search_scroll_offset = 0;
             self.update_frame();
             return;
         }
 
-        // 3. Click on a result row — seek to that message and switch back to Chat view
-        let visible_items = ((height - results_y) / item_h) as usize;
+        // 2. Results list cards: start at y=102.0
+        let cur_y = 102.0;
+        let item_h = 36.0;
+
+        let visible_items = ((height - cur_y) / item_h) as usize;
         let start_idx = self.ui.search_scroll_offset;
         let end_idx = (start_idx + visible_items).min(self.ui.search_results.len());
 
         for (i, res) in self.ui.search_results[start_idx..end_idx].iter().enumerate() {
-            let item_y = results_y + (i as f32 * item_h);
+            let item_y = cur_y + (i as f32 * item_h);
             let hb = HitBox::new(12.0, item_y, width - 24.0, item_h - 4.0);
             if hb.contains(rx, ry) {
                 self.mpv.seek_absolute(res.sec);
                 self.ui.current_view = UiView::Chat;
+                self.update_search_keys_state();
                 self.update_frame();
                 return;
             }
@@ -598,22 +649,6 @@ impl PluginState {
     }
 
     fn update_frame(&mut self) {
-        // Always sync view state to mpv properties so the Lua keyboard helper
-        // (twitch_chat_keys.lua) knows whether to forward keypresses.
-        // Done unconditionally — mpv deduplicates no-op property sets cheaply.
-        let view_str = match self.ui.current_view {
-            UiView::Chat => "chat",
-            UiView::Search => "search",
-            UiView::Settings => "settings",
-        };
-        let enabled_str = if self.ui.chat_enabled { "yes" } else { "no" };
-        let r1 = self.mpv.set_property_string("user-data/twitch_chat/view", view_str);
-        let r2 = self.mpv.set_property_string("user-data/twitch_chat/enabled", enabled_str);
-        log_plugin(&format!(
-            "update_frame: synced view='{}' (ret={}), enabled='{}' (ret={})",
-            view_str, r1, enabled_str, r2
-        ));
-
         if !self.ui.chat_enabled {
             if self.overlay_active {
                 self.mpv.overlay_remove(OVERLAY_ID);
@@ -641,8 +676,8 @@ impl PluginState {
         let current_ms =
             session_start + self.ui.offset_ms + (current_video_sec * 1000.0).round() as i64;
 
-        // Fetch messages, applying the user's scroll offset (mirrors Lua's eff_idx).
-        let active_msgs = session.get_messages_scrolled(current_ms, self.ui.scroll_offset, 80);
+        // Fetch recent messages with scroll offset applied
+        let active_msgs = session.get_messages_up_to(current_ms, self.ui.scroll_offset, 80);
 
         // Layout messages
         let line_height = (self.ui.font_size * 1.45).round();
@@ -732,9 +767,14 @@ pub unsafe extern "C" fn mpv_open_cplugin(ctx: MpvHandleRaw) -> c_int {
     loop {
         // Dynamically update hover state so mouse section is enabled ONLY when cursor is over the panel
         state.update_mouse_hover();
+        state.update_search_keys_state();
 
         let event_ptr = state.mpv.wait_event(0.04);
         if event_ptr.is_null() {
+            // Even on timeout, if in Search view, refresh overlay for cursor blink animation
+            if state.ui.current_view == UiView::Search && state.vo_configured && state.playback_active {
+                state.update_frame();
+            }
             continue;
         }
 
@@ -826,58 +866,56 @@ pub unsafe extern "C" fn mpv_open_cplugin(ctx: MpvHandleRaw) -> c_int {
                                 state.on_click_event();
                             }
                             "wheel_up" | "twitch_chat/wheel_up" => {
-                                // UP = scroll back into past (older messages)
-                                state.ui.scroll_offset += 6;
-                                state.clamp_scroll_offset();
+                                if state.ui.current_view == UiView::Search {
+                                    state.ui.search_scroll_offset = state.ui.search_scroll_offset.saturating_sub(1);
+                                } else {
+                                    state.ui.scroll_offset = state.ui.scroll_offset.saturating_add(4);
+                                }
                                 state.update_frame();
                             }
                             "wheel_down" | "twitch_chat/wheel_down" => {
-                                // DOWN = scroll forward into future (newer messages)
-                                state.ui.scroll_offset -= 6;
-                                state.clamp_scroll_offset();
+                                if state.ui.current_view == UiView::Search {
+                                    state.ui.search_scroll_offset = (state.ui.search_scroll_offset + 1)
+                                        .min(state.ui.search_results.len().saturating_sub(1));
+                                } else {
+                                    state.ui.scroll_offset = state.ui.scroll_offset.saturating_sub(4);
+                                }
                                 state.update_frame();
                             }
-                            // --- Search keyboard bindings (forwarded by twitch_chat_keys.lua) ---
-                            // type_key <char>: append a single character to the query.
-                            "type_key" | "twitch_chat/type_key" => {
+                            "sk" | "twitch_chat/sk" => {
                                 if args.len() >= 2 {
-                                    log_plugin(&format!(
-                                        "type_key: received char='{}' ({} bytes), current query='{}'",
-                                        args[1], args[1].len(), state.ui.search_query
-                                    ));
                                     state.ui.search_query.push_str(&args[1]);
                                     state.perform_search();
-                                } else {
-                                    log_plugin("type_key: received without char argument");
-                                }
-                            }
-                            "search_bs" | "twitch_chat/search_bs" => {
-                                log_plugin("search_bs: received");
-                                if !state.ui.search_query.is_empty() {
-                                    state.ui.search_query = pop_last_char(&state.ui.search_query);
-                                    state.perform_search();
-                                }
-                            }
-                            "search_space" | "twitch_chat/search_space" => {
-                                log_plugin("search_space: received");
-                                state.ui.search_query.push(' ');
-                                state.perform_search();
-                            }
-                            "search_enter" | "twitch_chat/search_enter" => {
-                                // ENTER = jump to the first (oldest) result, like Lua.
-                                if let Some(first) = state.ui.search_results.first().cloned() {
-                                    state.mpv.seek_absolute(first.sec);
-                                    state.ui.current_view = UiView::Chat;
                                     state.update_frame();
                                 }
                             }
-                            "search_esc" | "twitch_chat/search_esc" => {
-                                // ESC = close search, return to Chat view.
-                                state.ui.current_view = UiView::Chat;
+                            "sk_space" | "twitch_chat/sk_space" => {
+                                state.ui.search_query.push(' ');
+                                state.perform_search();
                                 state.update_frame();
+                            }
+                            "sk_bs" | "twitch_chat/sk_bs" => {
+                                state.ui.search_query.pop();
+                                state.perform_search();
+                                state.update_frame();
+                            }
+                            "sk_esc" | "twitch_chat/sk_esc" => {
+                                state.ui.current_view = UiView::Chat;
+                                state.update_search_keys_state();
+                                state.update_frame();
+                            }
+                            "sk_enter" | "twitch_chat/sk_enter" => {
+                                if !state.ui.search_results.is_empty() {
+                                    let sec = state.ui.search_results[0].sec;
+                                    state.mpv.seek_absolute(sec);
+                                    state.ui.current_view = UiView::Chat;
+                                    state.update_search_keys_state();
+                                    state.update_frame();
+                                }
                             }
                             "toggle" | "twitch_chat/toggle" => {
                                 state.ui.chat_enabled = !state.ui.chat_enabled;
+                                state.update_search_keys_state();
                                 state.update_frame();
                             }
                             "toggle_settings" | "twitch_chat/toggle_settings" => {
@@ -886,6 +924,7 @@ pub unsafe extern "C" fn mpv_open_cplugin(ctx: MpvHandleRaw) -> c_int {
                                 } else {
                                     state.ui.current_view = UiView::Settings;
                                 }
+                                state.update_search_keys_state();
                                 state.update_frame();
                             }
                             "toggle_search" | "twitch_chat/toggle_search" => {
@@ -893,7 +932,9 @@ pub unsafe extern "C" fn mpv_open_cplugin(ctx: MpvHandleRaw) -> c_int {
                                     state.ui.current_view = UiView::Chat;
                                 } else {
                                     state.ui.current_view = UiView::Search;
+                                    state.perform_search();
                                 }
+                                state.update_search_keys_state();
                                 state.update_frame();
                             }
                             "offset_inc" | "twitch_chat/offset_inc" => {
