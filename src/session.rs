@@ -481,19 +481,45 @@ impl SessionManager {
     }
 
     /// 1-Click Sync anchor: updates session_start_ms in memory and on disk
-    pub fn calibrate_anchor(&mut self, target_msg_ts: i64, current_video_time_sec: f64) -> bool {
+    pub fn calibrate_anchor(&mut self, target_msg_ts: i64, current_video_time_sec: f64, video_filename: &str) -> bool {
         let new_start = target_msg_ts - (current_video_time_sec * 1000.0).round() as i64;
         self.session_data.session_start_ms = new_start;
 
-        // Reset default offset to 0
+        for part in &mut self.session_data.parts {
+            let part_name = Path::new(&part.file)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| part.file.clone());
+            if part.file == video_filename || part_name == video_filename {
+                part.start_ms = new_start;
+            }
+        }
+
+        if !video_filename.is_empty() {
+            self.session_data.offsets_ms.insert(video_filename.to_string(), 0);
+        }
         self.session_data.offsets_ms.insert("default".to_string(), 0);
 
+        self.save_session_file()
+    }
+
+    /// Saves session_data to session_file on disk
+    pub fn save_session_file(&self) -> bool {
         if let Ok(json_str) = serde_json::to_string_pretty(&self.session_data) {
             if fs::write(&self.session_file, json_str).is_ok() {
                 return true;
             }
         }
         false
+    }
+
+    /// Saves manual offset for current video file
+    pub fn save_offset(&mut self, video_filename: &str, offset_ms: i64) -> bool {
+        if !video_filename.is_empty() {
+            self.session_data.offsets_ms.insert(video_filename.to_string(), offset_ms);
+        }
+        self.session_data.offsets_ms.insert("default".to_string(), offset_ms);
+        self.save_session_file()
     }
 
     /// Searches messages case-insensitively (supporting English and Russian)

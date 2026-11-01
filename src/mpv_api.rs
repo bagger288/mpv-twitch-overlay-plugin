@@ -531,4 +531,9 @@ impl MpvHandle {
         let sec_str = format!("{:.3}", seconds);
         self.command(&["seek", &sec_str, "absolute+exact"]);
     }
+
+    pub fn osd_message(&self, text: &str, duration_ms: u32) {
+        let dur_str = duration_ms.to_string();
+        self.command(&["show-text", text, &dur_str]);
+    }
 }

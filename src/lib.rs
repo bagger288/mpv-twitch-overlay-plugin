@@ -18,7 +18,7 @@ use mpv_api::{log_plugin, MpvEventClientMessage, MpvEventId, MpvFormat, MpvHandl
 use renderer::ChatRenderer;
 use session::{swap_keyboard_layout, SessionManager};
 use std::os::raw::c_int;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use ui::{HitBox, UiState, UiView};
 
 // mpv overlay ID must be in the range [0..63].
@@ -496,6 +496,13 @@ impl PluginState {
         // Row 1: Reset offset
         if ChatRenderer::btn_offset_reset().contains(rx, ry) {
             self.ui.offset_ms = 0;
+            let video_filename = Path::new(&self.current_path)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            if let Some(session) = &mut self.session {
+                session.save_offset(&video_filename, 0);
+            }
             self.update_frame();
             return;
         }
@@ -507,6 +514,13 @@ impl PluginState {
             let hb = ChatRenderer::btn_offset_step(i, cur_y);
             if hb.contains(rx, ry) {
                 self.ui.offset_ms += delta;
+                let video_filename = Path::new(&self.current_path)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                if let Some(session) = &mut self.session {
+                    session.save_offset(&video_filename, self.ui.offset_ms);
+                }
                 self.update_frame();
                 return;
             }
@@ -606,16 +620,62 @@ impl PluginState {
         // Row 5: 1-Click Sync Button
         let sync_btn_hb = HitBox::new(20.0, cur_y + 44.0, width - 40.0, 24.0);
         if sync_btn_hb.contains(rx, ry) {
-            if let Some(ref anchor_msg) = self.ui.selected_sync_msg {
+            let target_msg = if let Some(ref m) = self.ui.selected_sync_msg {
+                Some(m.clone())
+            } else if let Some(session) = &self.session {
+                // If no message explicitly clicked yet, find the message nearest to current playback position
+                let session_start = session.session_data.session_start_ms;
+                let cur_ts = session_start + (self.current_time_pos * 1000.0).round() as i64 + self.ui.offset_ms;
+                let msgs = session.get_messages_up_to(cur_ts, 0, 1);
+                msgs.last().cloned()
+            } else {
+                None
+            };
+
+            if let Some(anchor_msg) = target_msg {
+                self.ui.selected_sync_msg = Some(anchor_msg.clone());
                 let target_ts = anchor_msg.timestamp_ms;
                 let current_video_sec = self.current_time_pos;
-                if let Some(session) = &self.session {
-                    let session_start = session.session_data.session_start_ms;
-                    let new_offset = target_ts
-                        - (session_start + (current_video_sec * 1000.0).round() as i64);
-                    self.ui.offset_ms = new_offset;
+                let video_filename = Path::new(&self.current_path)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+
+                if let Some(session) = &mut self.session {
+                    let success = session.calibrate_anchor(target_ts, current_video_sec, &video_filename);
+                    self.ui.offset_ms = 0;
                     self.update_frame();
+
+                    let vid_str = session::format_hms(current_video_sec);
+                    let author = &anchor_msg.display_name;
+                    let text_snip: String = anchor_msg.text.chars().take(28).collect();
+
+                    if success {
+                        let fname = session.session_file
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_else(|| "session.json".to_string());
+                        let msg = format!(
+                            "⚓ Видео и чат синхронизированы!\nКадр видео: {}\nЯкорь: {}: {}\nsession_start_ms = {}\nСохранено в {}",
+                            vid_str,
+                            author,
+                            text_snip,
+                            session.session_data.session_start_ms,
+                            fname
+                        );
+                        self.mpv.osd_message(&msg, 3500);
+                        log_plugin(&format!("calibrate_anchor saved to disk: {}", msg));
+                    } else {
+                        let msg = format!(
+                            "⚓ Синхронизировано в памяти (ошибка записи в {:?})\nКадр: {}",
+                            session.session_file, vid_str
+                        );
+                        self.mpv.osd_message(&msg, 3000);
+                        log_plugin(&format!("calibrate_anchor write failed: {:?}", session.session_file));
+                    }
                 }
+            } else {
+                self.mpv.osd_message("Сначала кликните по сообщению в чате для выбора якоря!", 2500);
             }
         }
     }
@@ -731,9 +791,23 @@ impl PluginState {
         log_plugin(&format!("on_path_changed: {}", new_path));
         let path = PathBuf::from(new_path);
         if let Some(mgr) = SessionManager::try_load(&path) {
+            let filename = path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+
+            let initial_offset = mgr
+                .session_data
+                .offsets_ms
+                .get(&filename)
+                .or_else(|| mgr.session_data.offsets_ms.get("default"))
+                .copied()
+                .unwrap_or(0);
+            self.ui.offset_ms = initial_offset;
+
             log_plugin(&format!(
-                "Session successfully loaded from: {:?}",
-                mgr.session_dir
+                "Session successfully loaded from: {:?}, initial offset: {}ms",
+                mgr.session_dir, initial_offset
             ));
             log_plugin(&format!(
                 "Found {} chat messages, {} emotes, {} badges",
