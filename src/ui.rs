@@ -36,8 +36,8 @@ pub struct UiState {
     pub panel_y: i32,
     pub bg_opacity: f32,
 
-    // Chat scroll state (0 = live auto-scroll, >0 = scrolled back in history)
-    pub scroll_offset: usize,
+    // Chat scroll state (0 = live auto-scroll, >0 = history/past, <0 = future)
+    pub scroll_offset: i32,
 
     // Selected message for 1-click sync calibration
     pub selected_sync_msg: Option<ChatMessage>,

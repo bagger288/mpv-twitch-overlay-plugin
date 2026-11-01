@@ -174,7 +174,7 @@ impl ChatRenderer {
         let width = ui.panel_width as f32;
         let height = ui.panel_height as f32;
         let visible_top = 32.0;
-        let ban_h = if ui.scroll_offset > 0 { 28.0 } else { 0.0 };
+        let ban_h = if ui.scroll_offset != 0 { 28.0 } else { 0.0 };
         let visible_bottom = height - ban_h - 4.0;
 
         if messages.is_empty() {
@@ -239,8 +239,8 @@ impl ChatRenderer {
             }
         }
 
-        // If scrolled back in history, render banner at bottom
-        if ui.scroll_offset > 0 {
+        // If scrolled into history or into future, render interactive banner at bottom
+        if ui.scroll_offset != 0 {
             let ban_y = height - 26.0;
             let mut ban_paint = Paint::default();
             ban_paint.set_color_rgba8(37, 24, 56, 240);
@@ -255,7 +255,11 @@ impl ChatRenderer {
                 pixmap.fill_rect(r, &b_paint, Transform::identity(), None);
             }
 
-            let msg_text = format!("⬇ Чат: назад (-{}) | Клик: к live", ui.scroll_offset);
+            let msg_text = if ui.scroll_offset > 0 {
+                format!("⬆ Чат: история (-{}) | Клик: к live", ui.scroll_offset)
+            } else {
+                format!("⬇ Чат: будущее (+{}) | Клик: к live", -ui.scroll_offset)
+            };
             self.draw_text(pixmap, &msg_text, 14.0, ban_y + 5.0, 11.0, [0, 255, 230, 255]);
         }
     }

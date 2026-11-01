@@ -313,8 +313,11 @@ impl SessionManager {
         })
     }
 
-    /// Finds index range of messages up to `current_ms`, shifted backwards by `scroll_offset`
-    pub fn get_messages_up_to(&self, current_ms: i64, scroll_offset: usize, max_count: usize) -> &[ChatMessage] {
+    /// Finds index range of messages up to `current_ms`, shifted by `scroll_offset`:
+    /// - `scroll_offset > 0`: shifted backwards into past history
+    /// - `scroll_offset < 0`: shifted forward into future messages
+    /// - `scroll_offset == 0`: current live position
+    pub fn get_messages_up_to(&self, current_ms: i64, scroll_offset: i32, max_count: usize) -> &[ChatMessage] {
         if self.messages.is_empty() {
             return &[];
         }
@@ -324,7 +327,11 @@ impl SessionManager {
             Err(i) => i,
         };
 
-        let eff_idx = last_idx.saturating_sub(scroll_offset).min(self.messages.len());
+        let min_idx = if self.messages.is_empty() { 0 } else { 1 };
+        let max_idx = self.messages.len();
+        let eff_idx = (last_idx as i64 - scroll_offset as i64)
+            .clamp(min_idx as i64, max_idx as i64) as usize;
+
         let start = eff_idx.saturating_sub(max_count);
         &self.messages[start..eff_idx]
     }

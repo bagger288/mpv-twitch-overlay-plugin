@@ -93,48 +93,65 @@ fn get_client_cursor_pos(_mpv: &MpvHandle) -> Option<(i32, i32)> {
 
 /// Builds keybindings string for the search input section in mpv
 fn build_search_section_string() -> String {
-    let mut s = String::with_capacity(4096);
+    let mut s = String::with_capacity(8192);
 
     // Latin letters a-z and A-Z
     for b in b'a'..=b'z' {
         let ch = b as char;
         let up = ch.to_ascii_uppercase();
-        s.push_str(&format!("{ch} script-message-to twitch_chat sk {ch}\n"));
-        s.push_str(&format!("Shift+{ch} script-message-to twitch_chat sk {up}\n"));
+        s.push_str(&format!("{ch} script-message twitch_chat_key {ch}\n"));
+        s.push_str(&format!("Shift+{ch} script-message twitch_chat_key {up}\n"));
     }
 
     // Digits 0-9
     for d in b'0'..=b'9' {
         let dh = d as char;
-        s.push_str(&format!("{dh} script-message-to twitch_chat sk {dh}\n"));
+        s.push_str(&format!("{dh} script-message twitch_chat_key {dh}\n"));
     }
 
     // Printable symbols
-    s.push_str("SPACE script-message-to twitch_chat sk_space\n");
-    s.push_str("- script-message-to twitch_chat sk -\n");
-    s.push_str("_ script-message-to twitch_chat sk _\n");
-    s.push_str(". script-message-to twitch_chat sk .\n");
-    s.push_str(", script-message-to twitch_chat sk ,\n");
-    s.push_str("! script-message-to twitch_chat sk !\n");
-    s.push_str("? script-message-to twitch_chat sk ?\n");
-    s.push_str("/ script-message-to twitch_chat sk /\n");
-    s.push_str("@ script-message-to twitch_chat sk @\n");
-    s.push_str("# script-message-to twitch_chat sk #\n");
-    s.push_str(": script-message-to twitch_chat sk :\n");
+    s.push_str("SPACE script-message twitch_chat_space\n");
+    s.push_str("- script-message twitch_chat_key -\n");
+    s.push_str("_ script-message twitch_chat_key _\n");
+    s.push_str(". script-message twitch_chat_key .\n");
+    s.push_str(", script-message twitch_chat_key ,\n");
+    s.push_str("! script-message twitch_chat_key !\n");
+    s.push_str("? script-message twitch_chat_key ?\n");
+    s.push_str("/ script-message twitch_chat_key /\n");
+    s.push_str("@ script-message twitch_chat_key @\n");
+    s.push_str("# script-message twitch_chat_key #\n");
+    s.push_str(": script-message twitch_chat_key :\n");
+    s.push_str("; script-message twitch_chat_key ;\n");
+    s.push_str("+ script-message twitch_chat_key +\n");
+    s.push_str("= script-message twitch_chat_key =\n");
+    s.push_str("* script-message twitch_chat_key *\n");
+    s.push_str("( script-message twitch_chat_key (\n");
+    s.push_str(") script-message twitch_chat_key )\n");
+    s.push_str("[ script-message twitch_chat_key [\n");
+    s.push_str("] script-message twitch_chat_key ]\n");
 
     // Cyrillic letters (Russian lowercase & uppercase)
     const CYR_LOWER: &str = "абвгдеёжзийклмнопрстуфхцчшщъыьэюя";
     const CYR_UPPER: &str = "АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ";
     for (low, up) in CYR_LOWER.chars().zip(CYR_UPPER.chars()) {
-        s.push_str(&format!("{low} script-message-to twitch_chat sk {low}\n"));
-        s.push_str(&format!("{up} script-message-to twitch_chat sk {up}\n"));
-        s.push_str(&format!("Shift+{low} script-message-to twitch_chat sk {up}\n"));
+        s.push_str(&format!("{low} script-message twitch_chat_key {low}\n"));
+        s.push_str(&format!("{up} script-message twitch_chat_key {up}\n"));
+        s.push_str(&format!("Shift+{low} script-message twitch_chat_key {up}\n"));
     }
 
     // Control keys
-    s.push_str("BS script-message-to twitch_chat sk_bs\n");
-    s.push_str("ESC script-message-to twitch_chat sk_esc\n");
-    s.push_str("ENTER script-message-to twitch_chat sk_enter\n");
+    s.push_str("BS script-message twitch_chat_bs\n");
+    s.push_str("ESC script-message twitch_chat_esc\n");
+    s.push_str("ENTER script-message twitch_chat_enter\n");
+
+    // Suppress player navigation keys during search so they never seek or trigger actions
+    s.push_str("LEFT script-message twitch_chat_ignore\n");
+    s.push_str("RIGHT script-message twitch_chat_ignore\n");
+    s.push_str("UP script-message twitch_chat_ignore\n");
+    s.push_str("DOWN script-message twitch_chat_ignore\n");
+    s.push_str("PGUP script-message twitch_chat_ignore\n");
+    s.push_str("PGDWN script-message twitch_chat_ignore\n");
+    s.push_str("Tab script-message twitch_chat_ignore\n");
 
     s
 }
@@ -181,7 +198,7 @@ impl PluginState {
             self.mpv.command(&[
                 "define-section",
                 "twitch_chat_mouse",
-                "MBTN_LEFT script-message-to twitch_chat click\nWHEEL_UP script-message-to twitch_chat wheel_up\nWHEEL_DOWN script-message-to twitch_chat wheel_down",
+                "MBTN_LEFT script-message click\nWHEEL_UP script-message wheel_up\nWHEEL_DOWN script-message wheel_down",
                 "force",
             ]);
             self.mpv.command(&["disable-section", "twitch_chat_mouse"]);
@@ -209,10 +226,12 @@ impl PluginState {
         self.init_search_section();
         let should_enable = self.ui.chat_enabled && self.ui.current_view == UiView::Search;
         if should_enable && !self.search_section_enabled {
-            self.mpv.command(&["enable-section", "twitch_chat_search", "force"]);
+            self.mpv.command(&["enable-section", "twitch_chat_search", "allow-hide-cursor+allow-vo-dragging"]);
+            self.mpv.command(&["script-message", "twitch_search_active", "1"]);
             self.search_section_enabled = true;
         } else if !should_enable && self.search_section_enabled {
             self.mpv.command(&["disable-section", "twitch_chat_search"]);
+            self.mpv.command(&["script-message", "twitch_search_active", "0"]);
             self.search_section_enabled = false;
         }
     }
@@ -320,8 +339,8 @@ impl PluginState {
         match self.ui.current_view {
             UiView::Chat => {
                 let height = self.ui.panel_height as f32;
-                // If scrolled, clicking bottom banner returns to live
-                if self.ui.scroll_offset > 0 && rel_y >= height - 32.0 {
+                // If scrolled (into history or future), clicking bottom banner returns to live
+                if self.ui.scroll_offset != 0 && rel_y >= height - 32.0 {
                     self.ui.scroll_offset = 0;
                     self.update_frame();
                     return;
@@ -353,7 +372,7 @@ impl PluginState {
                 );
 
                 let visible_top = 32.0;
-                let ban_h = if self.ui.scroll_offset > 0 { 28.0 } else { 0.0 };
+                let ban_h = if self.ui.scroll_offset != 0 { 28.0 } else { 0.0 };
                 let visible_bottom = height - ban_h - 4.0;
                 let total_msg_h = layout_messages.last().map(|m| m.bottom_y).unwrap_or(0.0);
                 let available_h = visible_bottom - visible_top;
@@ -862,49 +881,53 @@ pub unsafe extern "C" fn mpv_open_cplugin(ctx: MpvHandleRaw) -> c_int {
 
                     if let Some(first_arg) = args.first() {
                         match first_arg.as_str() {
-                            "click" | "twitch_chat/click" => {
+                            "click" | "twitch_chat/click" | "twitch_chat_click" => {
                                 state.on_click_event();
                             }
-                            "wheel_up" | "twitch_chat/wheel_up" => {
+                            "wheel_up" | "twitch_chat/wheel_up" | "twitch_chat_wheel_up" => {
                                 if state.ui.current_view == UiView::Search {
                                     state.ui.search_scroll_offset = state.ui.search_scroll_offset.saturating_sub(1);
                                 } else {
-                                    state.ui.scroll_offset = state.ui.scroll_offset.saturating_add(4);
+                                    // Scroll backward in time (history)
+                                    let max_past = state.session.as_ref().map(|s| s.messages.len() as i32).unwrap_or(50000);
+                                    state.ui.scroll_offset = (state.ui.scroll_offset + 4).min(max_past);
                                 }
                                 state.update_frame();
                             }
-                            "wheel_down" | "twitch_chat/wheel_down" => {
+                            "wheel_down" | "twitch_chat/wheel_down" | "twitch_chat_wheel_down" => {
                                 if state.ui.current_view == UiView::Search {
                                     state.ui.search_scroll_offset = (state.ui.search_scroll_offset + 1)
                                         .min(state.ui.search_results.len().saturating_sub(1));
                                 } else {
-                                    state.ui.scroll_offset = state.ui.scroll_offset.saturating_sub(4);
+                                    // Scroll forward in time (future messages)
+                                    let max_future = state.session.as_ref().map(|s| s.messages.len() as i32).unwrap_or(50000);
+                                    state.ui.scroll_offset = (state.ui.scroll_offset - 4).max(-max_future);
                                 }
                                 state.update_frame();
                             }
-                            "sk" | "twitch_chat/sk" => {
+                            "sk" | "twitch_chat/sk" | "twitch_chat_key" | "twitch_chat/key" => {
                                 if args.len() >= 2 {
                                     state.ui.search_query.push_str(&args[1]);
                                     state.perform_search();
                                     state.update_frame();
                                 }
                             }
-                            "sk_space" | "twitch_chat/sk_space" => {
+                            "sk_space" | "twitch_chat/sk_space" | "twitch_chat_space" | "twitch_chat/space" => {
                                 state.ui.search_query.push(' ');
                                 state.perform_search();
                                 state.update_frame();
                             }
-                            "sk_bs" | "twitch_chat/sk_bs" => {
+                            "sk_bs" | "twitch_chat/sk_bs" | "twitch_chat_bs" | "twitch_chat/bs" => {
                                 state.ui.search_query.pop();
                                 state.perform_search();
                                 state.update_frame();
                             }
-                            "sk_esc" | "twitch_chat/sk_esc" => {
+                            "sk_esc" | "twitch_chat/sk_esc" | "twitch_chat_esc" | "twitch_chat/esc" => {
                                 state.ui.current_view = UiView::Chat;
                                 state.update_search_keys_state();
                                 state.update_frame();
                             }
-                            "sk_enter" | "twitch_chat/sk_enter" => {
+                            "sk_enter" | "twitch_chat/sk_enter" | "twitch_chat_enter" | "twitch_chat/enter" => {
                                 if !state.ui.search_results.is_empty() {
                                     let sec = state.ui.search_results[0].sec;
                                     state.mpv.seek_absolute(sec);
@@ -913,6 +936,7 @@ pub unsafe extern "C" fn mpv_open_cplugin(ctx: MpvHandleRaw) -> c_int {
                                     state.update_frame();
                                 }
                             }
+                            "twitch_chat_ignore" => {}
                             "toggle" | "twitch_chat/toggle" => {
                                 state.ui.chat_enabled = !state.ui.chat_enabled;
                                 state.update_search_keys_state();
