@@ -435,16 +435,22 @@ impl PluginState {
                     + (current_video_sec * 1000.0).round() as i64;
                 let active_msgs = session.get_messages_up_to(current_ms, self.ui.scroll_offset, 80);
 
-                let line_height = (self.ui.font_size * 1.45).round();
-                let emote_size = (self.ui.font_size * 1.3).round() as u32;
+                let dummy_cache;
+                let emotes_ref = match self.emotes.as_ref() {
+                    Some(e) => e,
+                    None => {
+                        dummy_cache = EmoteCache::new(&session.session_dir);
+                        &dummy_cache
+                    }
+                };
 
                 let layout_messages = self.renderer.layouter().layout_messages(
                     active_msgs,
                     &session.emotes_manifest,
+                    emotes_ref,
                     self.ui.panel_width as f32,
                     self.ui.font_size,
-                    line_height,
-                    emote_size,
+                    self.ui.emotes_enabled,
                 );
 
                 let visible_top = 32.0;
@@ -730,9 +736,10 @@ impl PluginState {
                 mgr.session_dir
             ));
             log_plugin(&format!(
-                "Found {} chat messages, {} channel emotes",
+                "Found {} chat messages, {} emotes, {} badges",
                 mgr.messages.len(),
-                mgr.emotes_manifest.channel_emotes.len()
+                mgr.emotes_manifest.total_emotes_count(),
+                mgr.emotes_manifest.badges.len()
             ));
             self.emotes = Some(EmoteCache::new(&mgr.session_dir));
             self.session = Some(mgr);
@@ -774,17 +781,14 @@ impl PluginState {
         // Fetch recent messages with scroll offset applied
         let active_msgs = session.get_messages_up_to(current_ms, self.ui.scroll_offset, 80);
 
-        // Layout messages
-        let line_height = (self.ui.font_size * 1.45).round();
-        let emote_size = (self.ui.font_size * 1.3).round() as u32;
-
+        // Layout messages with badges and inline emotes
         let layout_messages = self.renderer.layouter().layout_messages(
             active_msgs,
             &session.emotes_manifest,
+            emotes,
             self.ui.panel_width as f32,
             self.ui.font_size,
-            line_height,
-            emote_size,
+            self.ui.emotes_enabled,
         );
 
         let channel = self

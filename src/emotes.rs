@@ -1,49 +1,120 @@
-//! Emote and Badge in-memory caching and resizing
+//! Emote and Badge in-memory caching and resizing (Twitch, 7TV, BTTV, FFZ)
 
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tiny_skia::Pixmap;
 
 pub struct EmoteCache {
+    session_dir: PathBuf,
     base_cache_dir: PathBuf,
-    pixmap_cache: HashMap<(String, u32), Pixmap>, // key: (identifier, target_height)
+    pixmap_cache: Mutex<HashMap<(String, u32), Pixmap>>,
+    dimension_cache: Mutex<HashMap<(String, u32), u32>>,
 }
 
 impl EmoteCache {
     pub fn new(session_dir: &Path) -> Self {
-        // Try emote_cache next to session_dir or in parent dirs
-        let mut cache_dir = session_dir.join("emote_cache");
-        if !cache_dir.exists() {
-            if let Some(parent) = session_dir.parent() {
-                let p_cache = parent.join("emote_cache");
-                if p_cache.exists() {
-                    cache_dir = p_cache;
+        // Search for emote_cache dir in session_dir and parent directories
+        let mut candidates = Vec::new();
+        candidates.push(session_dir.join("emote_cache"));
+
+        if let Some(p1) = session_dir.parent() {
+            candidates.push(p1.join("emote_cache"));
+            if let Some(p2) = p1.parent() {
+                candidates.push(p2.join("emote_cache"));
+                if let Some(p3) = p2.parent() {
+                    candidates.push(p3.join("emote_cache"));
                 }
             }
         }
 
+        candidates.push(PathBuf::from("emote_cache"));
+        candidates.push(PathBuf::from("../emote_cache"));
+        candidates.push(PathBuf::from("../../emote_cache"));
+
+        let chosen = candidates
+            .into_iter()
+            .find(|p| p.is_dir() && p.exists())
+            .unwrap_or_else(|| {
+                // Default to project root: session_dir/../../emote_cache
+                session_dir
+                    .parent()
+                    .and_then(|p| p.parent())
+                    .map(|p| p.join("emote_cache"))
+                    .unwrap_or_else(|| session_dir.join("emote_cache"))
+            });
+
         Self {
-            base_cache_dir: cache_dir,
-            pixmap_cache: HashMap::new(),
+            session_dir: session_dir.to_path_buf(),
+            base_cache_dir: chosen,
+            pixmap_cache: Mutex::new(HashMap::new()),
+            dimension_cache: Mutex::new(HashMap::new()),
         }
     }
 
-    /// Loads image file, resizes to target_height, caches as Pixmap
-    pub fn get_or_load(&mut self, rel_or_abs_path: &str, target_height: u32) -> Option<&Pixmap> {
+    /// Resolves relative or absolute path against base_cache_dir or session_dir with extension fallbacks
+    pub fn resolve_path(&self, rel_or_abs_path: &str) -> Option<PathBuf> {
+        let p = Path::new(rel_or_abs_path);
+        if p.is_absolute() && p.exists() {
+            return Some(p.to_path_buf());
+        }
+
+        // 1. Direct path in emote_cache
+        let in_cache = self.base_cache_dir.join(rel_or_abs_path);
+        if in_cache.exists() {
+            return Some(in_cache);
+        }
+
+        // 2. Extension fallbacks (.png, .webp) in emote_cache
+        let with_png = in_cache.with_extension("png");
+        if with_png.exists() {
+            return Some(with_png);
+        }
+        let with_webp = in_cache.with_extension("webp");
+        if with_webp.exists() {
+            return Some(with_webp);
+        }
+
+        // 3. Fallback inside session_dir
+        let in_session = self.session_dir.join(rel_or_abs_path);
+        if in_session.exists() {
+            return Some(in_session);
+        }
+
+        None
+    }
+
+    /// Queries exact width for an emote image at given target_height (proportional aspect ratio)
+    pub fn get_width(&self, rel_or_abs_path: &str, target_height: u32) -> u32 {
         let key = (rel_or_abs_path.to_string(), target_height);
-        if self.pixmap_cache.contains_key(&key) {
-            return self.pixmap_cache.get(&key);
+        {
+            let guard = self.dimension_cache.lock();
+            if let Some(&w) = guard.get(&key) {
+                return w;
+            }
         }
 
-        let full_path = if Path::new(rel_or_abs_path).is_absolute() {
-            PathBuf::from(rel_or_abs_path)
-        } else {
-            self.base_cache_dir.join(rel_or_abs_path)
-        };
-
-        if !full_path.exists() {
-            return None;
+        if let Some(px) = self.get_or_load(rel_or_abs_path, target_height) {
+            let w = px.width();
+            self.dimension_cache.lock().insert(key, w);
+            return w;
         }
+
+        // Default square fallback
+        target_height
+    }
+
+    /// Loads image file, resizes to target_height with aspect ratio preservation, caches as Pixmap
+    pub fn get_or_load(&self, rel_or_abs_path: &str, target_height: u32) -> Option<Pixmap> {
+        let key = (rel_or_abs_path.to_string(), target_height);
+        {
+            let guard = self.pixmap_cache.lock();
+            if let Some(px) = guard.get(&key) {
+                return Some(px.clone());
+            }
+        }
+
+        let full_path = self.resolve_path(rel_or_abs_path)?;
 
         let dynamic_img = image::ImageReader::open(&full_path)
             .ok()?
@@ -85,11 +156,13 @@ impl EmoteCache {
             pixels[offset + 3] = (a * 255.0).round() as u8;
         }
 
-        self.pixmap_cache.insert(key.clone(), pixmap);
-        self.pixmap_cache.get(&key)
+        self.pixmap_cache.lock().insert(key.clone(), pixmap.clone());
+        self.dimension_cache.lock().insert(key, target_width);
+        Some(pixmap)
     }
 
-    pub fn clear(&mut self) {
-        self.pixmap_cache.clear();
+    pub fn clear(&self) {
+        self.pixmap_cache.lock().clear();
+        self.dimension_cache.lock().clear();
     }
 }

@@ -33,6 +33,13 @@ pub struct BadgeTag {
 }
 
 #[derive(Debug, Clone)]
+pub struct TwitchEmoteSpan {
+    pub start: usize,
+    pub end: usize,
+    pub emote_id: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct ChatMessage {
     pub timestamp_ms: i64,
     pub author: String,
@@ -45,22 +52,90 @@ pub struct ChatMessage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct EmoteMetadata {
-    pub name: String,
-    pub id: String,
-    pub source: String, // "7tv", "bttv", "ffz", "twitch"
+pub struct WordEmoteEntry {
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub file: Option<String>,
     #[serde(default)]
     pub local_path: Option<String>,
+}
+
+impl WordEmoteEntry {
+    pub fn get_path(&self) -> Option<&str> {
+        self.file.as_deref().or(self.local_path.as_deref())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct BadgeEntry {
+    #[serde(default)]
+    pub set_id: Option<String>,
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub file: Option<String>,
+    #[serde(default)]
+    pub local_path: Option<String>,
+}
+
+impl BadgeEntry {
+    pub fn get_path(&self) -> Option<&str> {
+        self.file.as_deref().or(self.local_path.as_deref())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct EmotesManifest {
     #[serde(default)]
-    pub channel_emotes: HashMap<String, EmoteMetadata>,
+    pub words: HashMap<String, WordEmoteEntry>,
     #[serde(default)]
-    pub global_emotes: HashMap<String, EmoteMetadata>,
+    pub channel_emotes: HashMap<String, WordEmoteEntry>,
     #[serde(default)]
-    pub badges: HashMap<String, HashMap<String, String>>, // badge_set -> version -> local_path
+    pub global_emotes: HashMap<String, WordEmoteEntry>,
+    #[serde(default)]
+    pub badges: HashMap<String, BadgeEntry>,
+}
+
+impl EmotesManifest {
+    pub fn get_word_emote_path(&self, word: &str) -> Option<String> {
+        if let Some(entry) = self.words.get(word) {
+            if let Some(p) = entry.get_path() {
+                return Some(p.to_string());
+            }
+        }
+        if let Some(entry) = self.channel_emotes.get(word) {
+            if let Some(p) = entry.get_path() {
+                return Some(p.to_string());
+            }
+        }
+        if let Some(entry) = self.global_emotes.get(word) {
+            if let Some(p) = entry.get_path() {
+                return Some(p.to_string());
+            }
+        }
+        None
+    }
+
+    pub fn get_badge_path(&self, set_id: &str, version: &str) -> String {
+        let key = format!("{}/{}", set_id, version);
+        if let Some(entry) = self.badges.get(&key) {
+            if let Some(p) = entry.get_path() {
+                return p.to_string();
+            }
+        }
+        format!("badges/{}_{}.png", set_id, version)
+    }
+
+    pub fn total_emotes_count(&self) -> usize {
+        self.words.len() + self.channel_emotes.len() + self.global_emotes.len()
+    }
 }
 
 pub struct SessionManager {
@@ -136,8 +211,33 @@ impl SessionManager {
             .trim_end_matches(".session.json")
             .to_string();
 
-        let chat_file = session_dir.join(format!("{}.chat.jsonl", session_stem));
-        let emotes_file = session_dir.join(format!("{}.emotes.json", session_stem));
+        let mut chat_file = session_dir.join(format!("{}.chat.jsonl", session_stem));
+        if !chat_file.exists() {
+            if let Ok(entries) = fs::read_dir(&session_dir) {
+                for e in entries.flatten() {
+                    let p = e.path();
+                    let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                    if name.ends_with(".chat.jsonl") || name == "chat.jsonl" {
+                        chat_file = p;
+                        break;
+                    }
+                }
+            }
+        }
+
+        let mut emotes_file = session_dir.join(format!("{}.emotes.json", session_stem));
+        if !emotes_file.exists() {
+            if let Ok(entries) = fs::read_dir(&session_dir) {
+                for e in entries.flatten() {
+                    let p = e.path();
+                    let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                    if name.ends_with(".emotes.json") || name == "emotes.json" {
+                        emotes_file = p;
+                        break;
+                    }
+                }
+            }
+        }
 
         let messages = if chat_file.exists() {
             Self::parse_chat_jsonl(&chat_file)
@@ -209,6 +309,37 @@ impl SessionManager {
                     if let Some(msg) = Self::parse_raw_irc(raw_str, recv_ts) {
                         messages.push(msg);
                     }
+                } else if let Some(text) = v.get("text").and_then(|t| t.as_str()) {
+                    let ts = v.get("ts").and_then(|t| t.as_i64()).unwrap_or(recv_ts);
+                    let user = v.get("user").and_then(|u| u.as_str()).unwrap_or("user").to_string();
+                    let display = v.get("display").and_then(|d| d.as_str()).unwrap_or(&user).to_string();
+                    let color = v.get("color").and_then(|c| c.as_str()).unwrap_or("").to_string();
+                    let badges_str = v.get("badges").and_then(|b| b.as_str()).unwrap_or("");
+                    let emotes_str = v.get("emotes").and_then(|e| e.as_str()).unwrap_or("").to_string();
+
+                    let mut badges = Vec::new();
+                    for b in badges_str.split(',') {
+                        let trimmed = b.trim();
+                        if !trimmed.is_empty() {
+                            if let Some((bname, bver)) = trimmed.split_once('/') {
+                                badges.push(BadgeTag {
+                                    name: bname.to_string(),
+                                    version: bver.to_string(),
+                                });
+                            }
+                        }
+                    }
+
+                    messages.push(ChatMessage {
+                        timestamp_ms: ts,
+                        author: user,
+                        display_name: display,
+                        color_hex: color,
+                        text: text.to_string(),
+                        badges,
+                        twitch_emotes_raw: emotes_str,
+                        is_gap: false,
+                    });
                 }
             }
         }
@@ -218,11 +349,14 @@ impl SessionManager {
         messages
     }
 
-    /// Parses raw IRC line format with tags
+    /// Parses raw IRC line format with tags (PRIVMSG and USERNOTICE)
     fn parse_raw_irc(raw: &str, fallback_ts: i64) -> Option<ChatMessage> {
-        if !raw.contains("PRIVMSG") {
+        let is_privmsg = raw.contains(" PRIVMSG ");
+        let is_usernotice = raw.contains(" USERNOTICE ");
+        if !is_privmsg && !is_usernotice {
             return None;
         }
+        let cmd_delimiter = if is_privmsg { " PRIVMSG " } else { " USERNOTICE " };
 
         let mut tags_str = "";
         let mut rest = raw;
@@ -274,11 +408,16 @@ impl SessionManager {
             }
         }
 
-        // Extract author and message body from :author!author@... PRIVMSG #channel :Message text
-        let colon_idx = rest.find(" PRIVMSG ")?;
-        let after_privmsg = &rest[colon_idx + 9..];
-        let msg_colon = after_privmsg.find(" :")?;
-        let text = after_privmsg[msg_colon + 2..].to_string();
+        // Extract author and message body
+        let colon_idx = rest.find(cmd_delimiter)?;
+        let after_cmd = &rest[colon_idx + cmd_delimiter.len()..];
+        let text = if let Some(msg_colon) = after_cmd.find(" :") {
+            after_cmd[msg_colon + 2..].to_string()
+        } else if let Some(pos) = after_cmd.find(':') {
+            after_cmd[pos + 1..].to_string()
+        } else {
+            String::new()
+        };
 
         let prefix = &rest[..colon_idx];
         let author = if let Some(bang) = prefix.find('!') {
@@ -311,6 +450,33 @@ impl SessionManager {
             twitch_emotes_raw: emotes_raw,
             is_gap: false,
         })
+    }
+
+    /// Parses Twitch IRC native emote spans from tag (e.g. 25:0-4,12-16/1902:6-10)
+    pub fn parse_twitch_emotes_tag(tag: &str) -> Vec<TwitchEmoteSpan> {
+        let mut spans = Vec::new();
+        if tag.is_empty() {
+            return spans;
+        }
+        for item in tag.split('/') {
+            if let Some((eid, occs)) = item.split_once(':') {
+                for occ in occs.split(',') {
+                    if let Some((s_str, e_str)) = occ.split_once('-') {
+                        if let (Ok(s), Ok(e)) = (s_str.parse::<usize>(), e_str.parse::<usize>()) {
+                            if s <= e {
+                                spans.push(TwitchEmoteSpan {
+                                    start: s,
+                                    end: e,
+                                    emote_id: eid.to_string(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        spans.sort_by_key(|s| s.start);
+        spans
     }
 
     /// Finds index range of messages up to `current_ms`, shifted by `scroll_offset`:

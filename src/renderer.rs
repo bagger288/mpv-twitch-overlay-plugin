@@ -26,7 +26,7 @@ impl ChatRenderer {
     pub fn render_frame(
         &self,
         messages: &[LayoutMessage],
-        emotes: &mut EmoteCache,
+        emotes: &EmoteCache,
         ui: &UiState,
         channel_name: &str,
     ) -> Option<Vec<u8>> {
@@ -178,7 +178,7 @@ impl ChatRenderer {
         &self,
         pixmap: &mut Pixmap,
         messages: &[LayoutMessage],
-        emotes: &mut EmoteCache,
+        emotes: &EmoteCache,
         ui: &UiState,
     ) {
         let width = ui.panel_width as f32;
