@@ -454,29 +454,7 @@ impl SessionManager {
 
     /// Parses Twitch IRC native emote spans from tag (e.g. 25:0-4,12-16/1902:6-10)
     pub fn parse_twitch_emotes_tag(tag: &str) -> Vec<TwitchEmoteSpan> {
-        let mut spans = Vec::new();
-        if tag.is_empty() {
-            return spans;
-        }
-        for item in tag.split('/') {
-            if let Some((eid, occs)) = item.split_once(':') {
-                for occ in occs.split(',') {
-                    if let Some((s_str, e_str)) = occ.split_once('-') {
-                        if let (Ok(s), Ok(e)) = (s_str.parse::<usize>(), e_str.parse::<usize>()) {
-                            if s <= e {
-                                spans.push(TwitchEmoteSpan {
-                                    start: s,
-                                    end: e,
-                                    emote_id: eid.to_string(),
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        spans.sort_by_key(|s| s.start);
-        spans
+        parse_twitch_emotes_tag(tag)
     }
 
     /// Finds index range of messages up to `current_ms`, shifted by `scroll_offset`:
@@ -556,6 +534,33 @@ impl SessionManager {
         }
         results
     }
+}
+
+/// Parses Twitch IRC native emote spans from tag (e.g. 25:0-4,12-16/1902:6-10)
+pub fn parse_twitch_emotes_tag(tag: &str) -> Vec<TwitchEmoteSpan> {
+    let mut spans = Vec::new();
+    if tag.is_empty() {
+        return spans;
+    }
+    for item in tag.split('/') {
+        if let Some((eid, occs)) = item.split_once(':') {
+            for occ in occs.split(',') {
+                if let Some((s_str, e_str)) = occ.split_once('-') {
+                    if let (Ok(s), Ok(e)) = (s_str.parse::<usize>(), e_str.parse::<usize>()) {
+                        if s <= e {
+                            spans.push(TwitchEmoteSpan {
+                                start: s,
+                                end: e,
+                                emote_id: eid.to_string(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+    spans.sort_by_key(|s| s.start);
+    spans
 }
 
 pub fn format_hms(seconds: f64) -> String {

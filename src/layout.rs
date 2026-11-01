@@ -144,7 +144,7 @@ impl ChatLayouter {
 
             for tok in parsed_tokens {
                 match tok {
-                    ContentToken::Emote { path, fallback_text } => {
+                    ContentToken::Emote { path, fallback_text: _ } => {
                         let ew = emotes.get_width(&path, emote_size) as f32;
                         if cur_x + ew > margin_x + content_width && cur_x > margin_x {
                             // Wrap to next line

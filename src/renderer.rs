@@ -3,7 +3,6 @@
 
 use crate::emotes::EmoteCache;
 use crate::layout::{ChatLayouter, LayoutMessage, LayoutToken};
-use crate::session::format_hms;
 use crate::ui::{HitBox, UiState, UiView};
 use tiny_skia::{Paint, Pixmap, Rect, Transform};
 
