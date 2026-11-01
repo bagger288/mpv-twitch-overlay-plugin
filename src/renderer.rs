@@ -153,6 +153,16 @@ impl ChatRenderer {
             );
         }
 
+        // Drag handle indicator (3 subtle vertical grip bars)
+        let grip_x = width - 42.0;
+        let mut grip_paint = Paint::default();
+        grip_paint.set_color_rgba8(80, 85, 105, 160);
+        for i in 0..3 {
+            if let Some(r) = Rect::from_xywh(grip_x + (i as f32 * 3.5), 9.0, 1.5, 10.0) {
+                pixmap.fill_rect(r, &grip_paint, Transform::identity(), None);
+            }
+        }
+
         // Close button [ ✕ ]
         self.draw_button(
             pixmap,

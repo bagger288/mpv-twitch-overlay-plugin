@@ -91,6 +91,23 @@ fn get_client_cursor_pos(_mpv: &MpvHandle) -> Option<(i32, i32)> {
     None
 }
 
+/// Checks if physical left mouse button is pressed on Windows
+#[cfg(target_os = "windows")]
+fn is_mouse_lbutton_down() -> bool {
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetAsyncKeyState(vKey: i32) -> i16;
+    }
+    unsafe {
+        (GetAsyncKeyState(0x01 /* VK_LBUTTON */) as u16 & 0x8000) != 0
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn is_mouse_lbutton_down() -> bool {
+    true
+}
+
 /// Builds keybindings string for the search input section in mpv
 fn build_search_section_string() -> String {
     let mut s = String::with_capacity(8192);
@@ -171,6 +188,12 @@ struct PluginState {
     mouse_section_enabled: bool,
     search_section_defined: bool,
     search_section_enabled: bool,
+    // Header drag state
+    is_dragging: bool,
+    drag_start_cursor_x: i32,
+    drag_start_cursor_y: i32,
+    drag_start_panel_x: i32,
+    drag_start_panel_y: i32,
 }
 
 impl PluginState {
@@ -190,6 +213,11 @@ impl PluginState {
             mouse_section_enabled: false,
             search_section_defined: false,
             search_section_enabled: false,
+            is_dragging: false,
+            drag_start_cursor_x: 0,
+            drag_start_cursor_y: 0,
+            drag_start_panel_x: 0,
+            drag_start_panel_y: 0,
         }
     }
 
@@ -198,7 +226,7 @@ impl PluginState {
             self.mpv.command(&[
                 "define-section",
                 "twitch_chat_mouse",
-                "MBTN_LEFT script-message click\nWHEEL_UP script-message wheel_up\nWHEEL_DOWN script-message wheel_down",
+                "MBTN_LEFT script-message click\nMBTN_LEFT_UP script-message mouse_up\nWHEEL_UP script-message wheel_up\nWHEEL_DOWN script-message wheel_down",
                 "force",
             ]);
             self.mpv.command(&["disable-section", "twitch_chat_mouse"]);
@@ -236,6 +264,42 @@ impl PluginState {
         }
     }
 
+    fn update_drag(&mut self) {
+        if !self.is_dragging {
+            return;
+        }
+
+        // Check if physical left mouse button was released
+        #[cfg(target_os = "windows")]
+        if !is_mouse_lbutton_down() {
+            self.is_dragging = false;
+            return;
+        }
+
+        if let Some((cur_mx, cur_my)) = get_client_cursor_pos(&self.mpv) {
+            let dx = cur_mx - self.drag_start_cursor_x;
+            let dy = cur_my - self.drag_start_cursor_y;
+
+            let new_x = self.drag_start_panel_x + dx;
+            let new_y = self.drag_start_panel_y + dy;
+
+            let osd_w = self.mpv.get_property_double("osd-width").unwrap_or(1920.0) as i32;
+            let osd_h = self.mpv.get_property_double("osd-height").unwrap_or(1080.0) as i32;
+
+            let max_x = (osd_w - 60).max(0);
+            let max_y = (osd_h - 40).max(0);
+
+            let clamped_x = new_x.clamp(0, max_x);
+            let clamped_y = new_y.clamp(0, max_y);
+
+            if clamped_x != self.ui.panel_x || clamped_y != self.ui.panel_y {
+                self.ui.panel_x = clamped_x;
+                self.ui.panel_y = clamped_y;
+                self.update_frame();
+            }
+        }
+    }
+
     fn update_mouse_hover(&mut self) {
         if !self.ui.chat_enabled || !self.vo_configured || !self.playback_active {
             if self.mouse_section_enabled {
@@ -247,7 +311,9 @@ impl PluginState {
 
         self.init_mouse_section();
 
-        let is_hovering = if let Some((mx, my)) = get_client_cursor_pos(&self.mpv) {
+        let is_hovering = if self.is_dragging {
+            true
+        } else if let Some((mx, my)) = get_client_cursor_pos(&self.mpv) {
             mx >= self.ui.panel_x
                 && mx <= self.ui.panel_x + self.ui.panel_width as i32
                 && my >= self.ui.panel_y
@@ -292,7 +358,7 @@ impl PluginState {
             || rel_y < 0.0
             || rel_y > self.ui.panel_height as f32
         {
-            if self.mouse_section_enabled {
+            if self.mouse_section_enabled && !self.is_dragging {
                 self.mpv.command(&["disable-section", "twitch_chat_mouse"]);
                 self.mouse_section_enabled = false;
             }
@@ -332,6 +398,16 @@ impl PluginState {
                 self.mouse_section_enabled = false;
             }
             self.update_search_keys_state();
+            return;
+        }
+
+        // Header Drag Bar (any click in the top 28px that is not on a tab/close button)
+        if rel_y >= 0.0 && rel_y <= 28.0 {
+            self.is_dragging = true;
+            self.drag_start_cursor_x = mx;
+            self.drag_start_cursor_y = my;
+            self.drag_start_panel_x = self.ui.panel_x;
+            self.drag_start_panel_y = self.ui.panel_y;
             return;
         }
 
@@ -784,11 +860,15 @@ pub unsafe extern "C" fn mpv_open_cplugin(ctx: MpvHandleRaw) -> c_int {
 
     // Main event loop (runs in mpv's dedicated plugin thread)
     loop {
+        // Continuously update position if dragging
+        state.update_drag();
+
         // Dynamically update hover state so mouse section is enabled ONLY when cursor is over the panel
         state.update_mouse_hover();
         state.update_search_keys_state();
 
-        let event_ptr = state.mpv.wait_event(0.04);
+        let wait_timeout = if state.is_dragging { 0.01 } else { 0.04 };
+        let event_ptr = state.mpv.wait_event(wait_timeout);
         if event_ptr.is_null() {
             // Even on timeout, if in Search view, refresh overlay for cursor blink animation
             if state.ui.current_view == UiView::Search && state.vo_configured && state.playback_active {
@@ -883,6 +963,9 @@ pub unsafe extern "C" fn mpv_open_cplugin(ctx: MpvHandleRaw) -> c_int {
                         match first_arg.as_str() {
                             "click" | "twitch_chat/click" | "twitch_chat_click" => {
                                 state.on_click_event();
+                            }
+                            "mouse_up" | "twitch_chat/mouse_up" | "twitch_chat_mouse_up" => {
+                                state.is_dragging = false;
                             }
                             "wheel_up" | "twitch_chat/wheel_up" | "twitch_chat_wheel_up" => {
                                 if state.ui.current_view == UiView::Search {
