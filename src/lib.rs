@@ -25,9 +25,41 @@ use ui::{HitBox, UiState, UiView};
 // ID 1 is safe, valid, and avoids thumbfast.lua's default ID 42.
 const OVERLAY_ID: u32 = 1;
 
-/// Safely retrieves client cursor coordinates on Windows without triggering mpv node formatting crashes
+/// Retrieves cursor coordinates in mpv OSD coordinate space
+fn get_cursor_pos(mpv: &MpvHandle) -> Option<(i32, i32)> {
+    // 1. mpv native subproperties (available in mpv >= 0.33)
+    if let (Some(x), Some(y)) = (
+        mpv.get_property_double("mouse-pos/x"),
+        mpv.get_property_double("mouse-pos/y"),
+    ) {
+        return Some((x.round() as i32, y.round() as i32));
+    }
+
+    // 2. mpv "mouse-pos" property as JSON string {"x":123,"y":456,"hover":true}
+    if let Some(json_str) = mpv.get_property_string("mouse-pos") {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&json_str) {
+            if let (Some(x), Some(y)) = (
+                val.get("x").and_then(|v| v.as_f64()),
+                val.get("y").and_then(|v| v.as_f64()),
+            ) {
+                return Some((x.round() as i32, y.round() as i32));
+            }
+        }
+    }
+
+    // 3. Fallback: OS window cursor converted to OSD coordinate space
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(pos) = get_win32_osd_cursor_pos(mpv) {
+            return Some(pos);
+        }
+    }
+
+    None
+}
+
 #[cfg(target_os = "windows")]
-fn get_client_cursor_pos(mpv: &MpvHandle) -> Option<(i32, i32)> {
+fn get_win32_osd_cursor_pos(mpv: &MpvHandle) -> Option<(i32, i32)> {
     use std::os::raw::c_void;
 
     #[repr(C)]
@@ -37,10 +69,20 @@ fn get_client_cursor_pos(mpv: &MpvHandle) -> Option<(i32, i32)> {
         y: i32,
     }
 
+    #[repr(C)]
+    #[derive(Default, Copy, Clone)]
+    struct WinRect {
+        left: i32,
+        top: i32,
+        right: i32,
+        bottom: i32,
+    }
+
     #[link(name = "user32")]
     extern "system" {
         fn GetCursorPos(lpPoint: *mut WinPoint) -> i32;
         fn ScreenToClient(hWnd: *mut c_void, lpPoint: *mut WinPoint) -> i32;
+        fn GetClientRect(hWnd: *mut c_void, lpRect: *mut WinRect) -> i32;
         fn GetForegroundWindow() -> *mut c_void;
         fn GetCurrentProcessId() -> u32;
         fn GetWindowThreadProcessId(hWnd: *mut c_void, lpdwProcessId: *mut u32) -> u32;
@@ -77,18 +119,24 @@ fn get_client_cursor_pos(mpv: &MpvHandle) -> Option<(i32, i32)> {
         }
 
         if !target_hwnd.is_null() {
+            let mut rc = WinRect::default();
+            GetClientRect(target_hwnd, &mut rc);
             if ScreenToClient(target_hwnd, &mut pt) != 0 {
-                return Some((pt.x, pt.y));
+                let client_w = (rc.right - rc.left).max(1) as f64;
+                let client_h = (rc.bottom - rc.top).max(1) as f64;
+
+                let osd_w = mpv.get_property_double("osd-width").unwrap_or(client_w);
+                let osd_h = mpv.get_property_double("osd-height").unwrap_or(client_h);
+
+                let osd_x = (pt.x as f64 * osd_w / client_w).round() as i32;
+                let osd_y = (pt.y as f64 * osd_h / client_h).round() as i32;
+
+                return Some((osd_x, osd_y));
             }
         }
 
         None
     }
-}
-
-#[cfg(not(target_os = "windows"))]
-fn get_client_cursor_pos(_mpv: &MpvHandle) -> Option<(i32, i32)> {
-    None
 }
 
 /// Checks if physical left mouse button is pressed on Windows
@@ -226,7 +274,7 @@ impl PluginState {
             self.mpv.command(&[
                 "define-section",
                 "twitch_chat_mouse",
-                "MBTN_LEFT script-message click\nMBTN_LEFT_UP script-message mouse_up\nWHEEL_UP script-message wheel_up\nWHEEL_DOWN script-message wheel_down",
+                "MBTN_LEFT script-message twitch_chat_click ${mouse-pos/x} ${mouse-pos/y}\nMBTN_LEFT_UP script-message twitch_chat_mouse_up\nWHEEL_UP script-message twitch_chat_wheel_up\nWHEEL_DOWN script-message twitch_chat_wheel_down",
                 "force",
             ]);
             self.mpv.command(&["disable-section", "twitch_chat_mouse"]);
@@ -264,6 +312,25 @@ impl PluginState {
         }
     }
 
+    fn save_chat_settings(&self) {
+        if let Some(session) = &self.session {
+            let settings_path = session.session_dir.join("chat_settings.json");
+            let data = serde_json::json!({
+                "chat_x": self.ui.panel_x,
+                "chat_y": self.ui.panel_y,
+                "chat_width": self.ui.panel_width,
+                "chat_height": self.ui.panel_height,
+                "chat_font_size": self.ui.font_size,
+                "chat_bg_opacity": self.ui.bg_opacity,
+                "chat_enabled": self.ui.chat_enabled,
+                "emotes_enabled": self.ui.emotes_enabled,
+            });
+            if let Ok(json_str) = serde_json::to_string_pretty(&data) {
+                let _ = std::fs::write(settings_path, json_str);
+            }
+        }
+    }
+
     fn update_drag(&mut self) {
         if !self.is_dragging {
             return;
@@ -273,10 +340,12 @@ impl PluginState {
         #[cfg(target_os = "windows")]
         if !is_mouse_lbutton_down() {
             self.is_dragging = false;
+            self.save_chat_settings();
+            log_plugin("Left mouse button released, ended dragging and saved position");
             return;
         }
 
-        if let Some((cur_mx, cur_my)) = get_client_cursor_pos(&self.mpv) {
+        if let Some((cur_mx, cur_my)) = get_cursor_pos(&self.mpv) {
             let dx = cur_mx - self.drag_start_cursor_x;
             let dy = cur_my - self.drag_start_cursor_y;
 
@@ -302,7 +371,7 @@ impl PluginState {
 
     fn update_mouse_hover(&mut self) {
         if !self.ui.chat_enabled || !self.vo_configured || !self.playback_active {
-            if self.mouse_section_enabled {
+            if self.mouse_section_enabled && !self.is_dragging {
                 self.mpv.command(&["disable-section", "twitch_chat_mouse"]);
                 self.mouse_section_enabled = false;
             }
@@ -313,11 +382,11 @@ impl PluginState {
 
         let is_hovering = if self.is_dragging {
             true
-        } else if let Some((mx, my)) = get_client_cursor_pos(&self.mpv) {
-            mx >= self.ui.panel_x
-                && mx <= self.ui.panel_x + self.ui.panel_width as i32
-                && my >= self.ui.panel_y
-                && my <= self.ui.panel_y + self.ui.panel_height as i32
+        } else if let Some((mx, my)) = get_cursor_pos(&self.mpv) {
+            mx >= self.ui.panel_x - 10
+                && mx <= self.ui.panel_x + self.ui.panel_width as i32 + 10
+                && my >= self.ui.panel_y - 10
+                && my <= self.ui.panel_y + self.ui.panel_height as i32 + 10
         } else {
             false
         };
@@ -325,7 +394,7 @@ impl PluginState {
         if is_hovering && !self.mouse_section_enabled {
             self.mpv.command(&["enable-section", "twitch_chat_mouse", "allow-hide-cursor+allow-vo-dragging"]);
             self.mouse_section_enabled = true;
-        } else if !is_hovering && self.mouse_section_enabled {
+        } else if !is_hovering && self.mouse_section_enabled && !self.is_dragging {
             self.mpv.command(&["disable-section", "twitch_chat_mouse"]);
             self.mouse_section_enabled = false;
         }
@@ -344,19 +413,22 @@ impl PluginState {
         }
     }
 
-    fn on_click_event(&mut self) {
-        let (mx, my) = match get_client_cursor_pos(&self.mpv) {
-            Some(pos) => pos,
-            None => return,
+    fn on_click_event(&mut self, explicit_x: Option<i32>, explicit_y: Option<i32>) {
+        let (mx, my) = if let (Some(x), Some(y)) = (explicit_x, explicit_y) {
+            (x, y)
+        } else if let Some(pos) = get_cursor_pos(&self.mpv) {
+            pos
+        } else {
+            return;
         };
 
         let rel_x = (mx - self.ui.panel_x) as f32;
         let rel_y = (my - self.ui.panel_y) as f32;
 
-        if rel_x < 0.0
-            || rel_x > self.ui.panel_width as f32
-            || rel_y < 0.0
-            || rel_y > self.ui.panel_height as f32
+        if rel_x < -15.0
+            || rel_x > (self.ui.panel_width as f32 + 15.0)
+            || rel_y < -15.0
+            || rel_y > (self.ui.panel_height as f32 + 15.0)
         {
             if self.mouse_section_enabled && !self.is_dragging {
                 self.mpv.command(&["disable-section", "twitch_chat_mouse"]);
@@ -401,13 +473,17 @@ impl PluginState {
             return;
         }
 
-        // Header Drag Bar (any click in the top 28px that is not on a tab/close button)
-        if rel_y >= 0.0 && rel_y <= 28.0 {
+        // Header Drag Bar (any click in the top 30px that is not on a tab/close button)
+        if rel_y >= -5.0 && rel_y <= 30.0 {
             self.is_dragging = true;
             self.drag_start_cursor_x = mx;
             self.drag_start_cursor_y = my;
             self.drag_start_panel_x = self.ui.panel_x;
             self.drag_start_panel_y = self.ui.panel_y;
+            log_plugin(&format!(
+                "Started dragging chat: cursor=({}, {}), panel=({}, {})",
+                mx, my, self.ui.panel_x, self.ui.panel_y
+            ));
             return;
         }
 
@@ -588,6 +664,7 @@ impl PluginState {
         if HitBox::new(px, cur_y, 48.0, 22.0).contains(rx, ry) {
             self.ui.panel_x = 24;
             self.ui.panel_y = 60;
+            self.save_chat_settings();
             self.update_frame();
             return;
         }
@@ -596,6 +673,7 @@ impl PluginState {
         if HitBox::new(px, cur_y, 48.0, 22.0).contains(rx, ry) {
             self.ui.panel_x = 24;
             self.ui.panel_y = (osd_h - self.ui.panel_height as i32 - 40).max(40);
+            self.save_chat_settings();
             self.update_frame();
             return;
         }
@@ -604,6 +682,7 @@ impl PluginState {
         if HitBox::new(px, cur_y, 48.0, 22.0).contains(rx, ry) {
             self.ui.panel_x = (osd_w - self.ui.panel_width as i32 - 24).max(24);
             self.ui.panel_y = 60;
+            self.save_chat_settings();
             self.update_frame();
             return;
         }
@@ -612,6 +691,7 @@ impl PluginState {
         if HitBox::new(px, cur_y, 48.0, 22.0).contains(rx, ry) {
             self.ui.panel_x = (osd_w - self.ui.panel_width as i32 - 24).max(24);
             self.ui.panel_y = (osd_h - self.ui.panel_height as i32 - 40).max(40);
+            self.save_chat_settings();
             self.update_frame();
             return;
         }
@@ -815,6 +895,30 @@ impl PluginState {
                 mgr.emotes_manifest.total_emotes_count(),
                 mgr.emotes_manifest.badges.len()
             ));
+            let settings_file = mgr.session_dir.join("chat_settings.json");
+            if let Ok(content) = std::fs::read_to_string(&settings_file) {
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
+                    if let Some(x) = val.get("chat_x").and_then(|v| v.as_i64()) {
+                        self.ui.panel_x = x as i32;
+                    }
+                    if let Some(y) = val.get("chat_y").and_then(|v| v.as_i64()) {
+                        self.ui.panel_y = y as i32;
+                    }
+                    if let Some(w) = val.get("chat_width").and_then(|v| v.as_u64()) {
+                        self.ui.panel_width = w as u32;
+                    }
+                    if let Some(h) = val.get("chat_height").and_then(|v| v.as_u64()) {
+                        self.ui.panel_height = h as u32;
+                    }
+                    if let Some(fs) = val.get("chat_font_size").and_then(|v| v.as_f64()) {
+                        self.ui.font_size = fs as f32;
+                    }
+                    if let Some(op) = val.get("chat_bg_opacity").and_then(|v| v.as_f64()) {
+                        self.ui.bg_opacity = op as f32;
+                    }
+                }
+            }
+
             self.emotes = Some(EmoteCache::new(&mgr.session_dir));
             self.session = Some(mgr);
             self.current_path = new_path.to_string();
@@ -925,6 +1029,7 @@ pub unsafe extern "C" fn mpv_open_cplugin(ctx: MpvHandleRaw) -> c_int {
     mpv.observe_property(2, "path", MpvFormat::String);
     mpv.observe_property(3, "pause", MpvFormat::Flag);
     mpv.observe_property(4, "vo-configured", MpvFormat::Flag);
+    mpv.observe_property(5, "mouse-pos", MpvFormat::None);
 
     let mut state = PluginState::new(mpv);
 
@@ -992,6 +1097,11 @@ pub unsafe extern "C" fn mpv_open_cplugin(ctx: MpvHandleRaw) -> c_int {
                             state.update_frame();
                         }
                     }
+                    5 => {
+                        // mouse-pos changed: instantly update dragging and hover detection
+                        state.update_drag();
+                        state.update_mouse_hover();
+                    }
                     _ => {}
                 }
             }
@@ -1040,10 +1150,16 @@ pub unsafe extern "C" fn mpv_open_cplugin(ctx: MpvHandleRaw) -> c_int {
                     if let Some(first_arg) = args.first() {
                         match first_arg.as_str() {
                             "click" | "twitch_chat/click" | "twitch_chat_click" => {
-                                state.on_click_event();
+                                let exp_x = args.get(1).and_then(|s| s.parse::<f64>().ok()).map(|f| f.round() as i32);
+                                let exp_y = args.get(2).and_then(|s| s.parse::<f64>().ok()).map(|f| f.round() as i32);
+                                state.on_click_event(exp_x, exp_y);
                             }
                             "mouse_up" | "twitch_chat/mouse_up" | "twitch_chat_mouse_up" => {
-                                state.is_dragging = false;
+                                if state.is_dragging {
+                                    state.is_dragging = false;
+                                    state.save_chat_settings();
+                                    log_plugin("Finished dragging chat (mouse_up event), saved position");
+                                }
                             }
                             "wheel_up" | "twitch_chat/wheel_up" | "twitch_chat_wheel_up" => {
                                 if state.ui.current_view == UiView::Search {
