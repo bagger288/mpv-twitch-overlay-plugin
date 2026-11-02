@@ -24,6 +24,7 @@ from typing import Dict, List, Optional, Tuple
 SCRIPT_DIR = Path(__file__).resolve().parent
 CONFIG_FILE = SCRIPT_DIR / "config.json"
 LUA_SCRIPT = SCRIPT_DIR / "twitch_chat.lua"
+LUA_INPUT_SCRIPT = SCRIPT_DIR / "twitch_chat_input.lua"
 RUST_DLL = SCRIPT_DIR / "twitch_chat.dll"
 RUST_DLL_TARGET = SCRIPT_DIR / "rust_plugin" / "target" / "release" / "twitch_chat.dll"
 
@@ -908,6 +909,9 @@ class TwitchRecordsApp:
 
         if is_rust:
             print(f"[Launcher] Using native high-performance Rust plugin: {chosen_script.resolve()}")
+            if LUA_INPUT_SCRIPT.exists():
+                cmd.append(f"--script={str(LUA_INPUT_SCRIPT.resolve())}")
+                print(f"[Launcher] Attached companion input script: {LUA_INPUT_SCRIPT.resolve()}")
         else:
             print(f"[Launcher] Using Lua script: {chosen_script}")
 
