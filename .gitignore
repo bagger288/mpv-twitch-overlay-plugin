@@ -1,0 +1,43 @@
+# Local documentation and development artifacts
+/docs/
+/target/
+/tools/
+/build/
+
+# Python caches and local environments
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Local settings, credentials, logs, and recordings
+/config.json
+/config.json.tmp
+/config.json.bak
+/config.json.backup
+/records/
+/emote_cache/
+/mpv.log
+.env
+.env.*
+!.env.example
+!.env.sample
+!.env.template
+
+# Native build artifacts in the project root
+/twitch_chat.dll
+/twitch_chat.pdb
+/twitch_chat.lib
+/twitch_chat.dll.lib
+/twitch_chat.exp
+/twitch_chat.dll.exp
+
+# Fonts not embedded in the current plugin
+/assets/DejaVuSansMono.ttf
+/assets/DejaVuSansMono-Bold.ttf
+/assets/Roboto-Regular.ttf
+/assets/Roobert-Regular.ttf
+/assets/Roobert-SemiBold.ttf
+/assets/inter-cyrillic.ttf
+/assets/inter-latin-700.ttf

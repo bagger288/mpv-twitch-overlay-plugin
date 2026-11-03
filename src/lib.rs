@@ -8,18 +8,21 @@
 pub mod chat;
 pub mod emotes;
 pub mod layout;
+pub mod mouse;
 pub mod mpv_api;
 pub mod renderer;
 pub mod session;
+pub mod text_effects;
 pub mod ui;
 
 use emotes::EmoteCache;
+use mouse::{MouseAction, PanelMouse};
 use mpv_api::{log_plugin, MpvEventClientMessage, MpvEventId, MpvFormat, MpvHandle, MpvHandleRaw};
 use renderer::ChatRenderer;
-use session::{swap_keyboard_layout, SessionManager};
+use session::SessionManager;
 use std::os::raw::c_int;
-use std::path::{Path, PathBuf};
-use ui::{HitBox, UiState, UiView};
+use std::path::PathBuf;
+use ui::{clamp_outline_width, max_settings_scroll, search_result_hit, ChatViewport, HeaderFade, HitBox, SearchHit, TextEffect, UiState, UiView};
 
 // mpv overlay ID must be in the range [0..63].
 // ID 1 is safe, valid, and avoids thumbfast.lua's default ID 42.
@@ -139,23 +142,6 @@ fn get_win32_osd_cursor_pos(mpv: &MpvHandle) -> Option<(i32, i32)> {
     }
 }
 
-/// Checks if physical left mouse button is pressed on Windows
-#[cfg(target_os = "windows")]
-fn is_mouse_lbutton_down() -> bool {
-    #[link(name = "user32")]
-    extern "system" {
-        fn GetAsyncKeyState(vKey: i32) -> i16;
-    }
-    unsafe {
-        (GetAsyncKeyState(0x01 /* VK_LBUTTON */) as u16 & 0x8000) != 0
-    }
-}
-
-#[cfg(not(target_os = "windows"))]
-fn is_mouse_lbutton_down() -> bool {
-    true
-}
-
 /// Builds keybindings string for the search input section in mpv
 fn build_search_section_string() -> String {
     let mut s = String::with_capacity(8192);
@@ -229,6 +215,8 @@ struct PluginState {
     ui: UiState,
     current_time_pos: f64,
     current_path: String,
+    explicit_session: Option<PathBuf>,
+    pending_search_seek: Option<f64>,
     vo_configured: bool,
     playback_active: bool,
     overlay_active: bool,
@@ -236,12 +224,9 @@ struct PluginState {
     mouse_section_enabled: bool,
     search_section_defined: bool,
     search_section_enabled: bool,
-    // Header drag state
-    is_dragging: bool,
-    drag_start_cursor_x: i32,
-    drag_start_cursor_y: i32,
-    drag_start_panel_x: i32,
-    drag_start_panel_y: i32,
+    mouse: PanelMouse,
+    header_fade: HeaderFade,
+    last_header_update: std::time::Instant,
 }
 
 impl PluginState {
@@ -254,6 +239,8 @@ impl PluginState {
             ui: UiState::default(),
             current_time_pos: 0.0,
             current_path: String::new(),
+            explicit_session: None,
+            pending_search_seek: None,
             vo_configured: false,
             playback_active: false,
             overlay_active: false,
@@ -261,22 +248,28 @@ impl PluginState {
             mouse_section_enabled: false,
             search_section_defined: false,
             search_section_enabled: false,
-            is_dragging: false,
-            drag_start_cursor_x: 0,
-            drag_start_cursor_y: 0,
-            drag_start_panel_x: 0,
-            drag_start_panel_y: 0,
+            mouse: PanelMouse::default(),
+            header_fade: HeaderFade::default(),
+            last_header_update: std::time::Instant::now(),
         }
     }
 
     fn init_mouse_section(&mut self) {
         if !self.mouse_section_defined {
-            self.mpv.command(&[
+            let client_name = self.mpv.client_name();
+            let bindings = format!(
+                "MBTN_LEFT script-binding {client_name}/twitch_chat_mouse\nWHEEL_UP script-message twitch_chat_wheel_up\nWHEEL_DOWN script-message twitch_chat_wheel_down"
+            );
+            let ret = self.mpv.command(&[
                 "define-section",
                 "twitch_chat_mouse",
-                "MBTN_LEFT script-message twitch_chat_click ${mouse-pos/x} ${mouse-pos/y}\nMBTN_LEFT_UP script-message twitch_chat_mouse_up\nWHEEL_UP script-message twitch_chat_wheel_up\nWHEEL_DOWN script-message twitch_chat_wheel_down",
+                &bindings,
                 "force",
             ]);
+            if ret < 0 {
+                log_plugin(&format!("Failed to define mouse section: {}", ret));
+                return;
+            }
             self.mpv.command(&["disable-section", "twitch_chat_mouse"]);
             self.mouse_section_defined = true;
             self.mouse_section_enabled = false;
@@ -300,7 +293,7 @@ impl PluginState {
 
     fn update_search_keys_state(&mut self) {
         self.init_search_section();
-        let should_enable = self.ui.chat_enabled && self.ui.current_view == UiView::Search;
+        let should_enable = self.ui.chat_enabled && !self.ui.minimized && self.ui.current_view == UiView::Search;
         if should_enable && !self.search_section_enabled {
             self.mpv.command(&["enable-section", "twitch_chat_search", "allow-hide-cursor+allow-vo-dragging"]);
             self.mpv.command(&["script-message", "twitch_search_active", "1"]);
@@ -324,6 +317,10 @@ impl PluginState {
                 "chat_bg_opacity": self.ui.bg_opacity,
                 "chat_enabled": self.ui.chat_enabled,
                 "emotes_enabled": self.ui.emotes_enabled,
+                "badges_enabled": self.ui.badges_enabled,
+                "chat_text_effect": self.ui.text_effect,
+                "chat_outline_width": self.ui.outline_width,
+                "chat_minimized_position": self.ui.minimized_position,
             });
             if let Ok(json_str) = serde_json::to_string_pretty(&data) {
                 let _ = std::fs::write(settings_path, json_str);
@@ -331,47 +328,68 @@ impl PluginState {
         }
     }
 
-    fn update_drag(&mut self) {
-        if !self.is_dragging {
-            return;
+    fn handle_mouse_action(&mut self, action: MouseAction) {
+        match action {
+            MouseAction::DragStarted => {
+                log_plugin(&format!(
+                    "Started dragging chat: panel=({}, {})",
+                    self.ui.panel_x, self.ui.panel_y
+                ));
+            }
+            MouseAction::DragFinished => {
+                self.save_chat_settings();
+                log_plugin(&format!(
+                    "Finished dragging chat, saved position=({}, {})",
+                    self.ui.panel_x, self.ui.panel_y
+                ));
+            }
+            MouseAction::Click(x, y) => self.on_click_event(Some(x), Some(y)),
+            MouseAction::None => {}
         }
+    }
 
-        // Check if physical left mouse button was released
-        #[cfg(target_os = "windows")]
-        if !is_mouse_lbutton_down() {
-            self.is_dragging = false;
+    fn on_mouse_binding(&mut self, key_state: &str) {
+        if key_state.as_bytes().first() == Some(&b'u')
+            && key_state.as_bytes().get(2) != Some(&b'c')
+        {
+            self.update_drag_position();
+        }
+        let was_dragging = self.mouse.is_dragging();
+        let cursor = get_cursor_pos(&self.mpv);
+        let action = self.mouse.handle(key_state, cursor, &self.ui);
+        if was_dragging && self.ui.minimized && matches!(action, MouseAction::Click(_, _)) {
             self.save_chat_settings();
-            log_plugin("Left mouse button released, ended dragging and saved position");
+        }
+        self.handle_mouse_action(action);
+    }
+
+    fn cancel_mouse(&mut self) {
+        let action = self.mouse.cancel();
+        self.handle_mouse_action(action);
+    }
+
+    fn update_drag_position(&mut self) {
+        if !self.mouse.is_dragging() {
             return;
         }
-
-        if let Some((cur_mx, cur_my)) = get_cursor_pos(&self.mpv) {
-            let dx = cur_mx - self.drag_start_cursor_x;
-            let dy = cur_my - self.drag_start_cursor_y;
-
-            let new_x = self.drag_start_panel_x + dx;
-            let new_y = self.drag_start_panel_y + dy;
-
+        if let Some(cursor) = get_cursor_pos(&self.mpv) {
             let osd_w = self.mpv.get_property_double("osd-width").unwrap_or(1920.0) as i32;
             let osd_h = self.mpv.get_property_double("osd-height").unwrap_or(1080.0) as i32;
-
-            let max_x = (osd_w - 60).max(0);
-            let max_y = (osd_h - 40).max(0);
-
-            let clamped_x = new_x.clamp(0, max_x);
-            let clamped_y = new_y.clamp(0, max_y);
-
-            if clamped_x != self.ui.panel_x || clamped_y != self.ui.panel_y {
-                self.ui.panel_x = clamped_x;
-                self.ui.panel_y = clamped_y;
-                self.update_frame();
+            if let Some((x, y)) = self.mouse.drag_position(cursor, (osd_w, osd_h)) {
+                let (old_x, old_y, _, _) = self.ui.overlay_geometry();
+                if x != old_x || y != old_y {
+                    self.ui.set_overlay_position(x, y);
+                    self.update_frame();
+                }
             }
         }
     }
 
     fn update_mouse_hover(&mut self) {
         if !self.ui.chat_enabled || !self.vo_configured || !self.playback_active {
-            if self.mouse_section_enabled && !self.is_dragging {
+            self.header_fade.hovered = false;
+            self.cancel_mouse();
+            if self.mouse_section_enabled {
                 self.mpv.command(&["disable-section", "twitch_chat_mouse"]);
                 self.mouse_section_enabled = false;
             }
@@ -380,37 +398,102 @@ impl PluginState {
 
         self.init_mouse_section();
 
-        let is_hovering = if self.is_dragging {
+        let (panel_x, panel_y, panel_width, panel_height) = self.ui.overlay_geometry();
+        let is_hovering = if self.mouse.is_pressed() {
             true
+        } else if self.mpv.get_property_bool("mouse-pos/hover") == Some(false) {
+            false
         } else if let Some((mx, my)) = get_cursor_pos(&self.mpv) {
-            mx >= self.ui.panel_x - 10
-                && mx <= self.ui.panel_x + self.ui.panel_width as i32 + 10
-                && my >= self.ui.panel_y - 10
-                && my <= self.ui.panel_y + self.ui.panel_height as i32 + 10
+            mx >= panel_x - 10 && mx <= panel_x + panel_width as i32 + 10
+                && my >= panel_y - 10 && my <= panel_y + panel_height as i32 + 10
         } else {
             false
         };
 
+        self.header_fade.hovered = is_hovering && !self.ui.minimized;
         if is_hovering && !self.mouse_section_enabled {
-            self.mpv.command(&["enable-section", "twitch_chat_mouse", "allow-hide-cursor+allow-vo-dragging"]);
-            self.mouse_section_enabled = true;
-        } else if !is_hovering && self.mouse_section_enabled && !self.is_dragging {
+            let ret = self.mpv.command(&["enable-section", "twitch_chat_mouse", "allow-hide-cursor"]);
+            self.mouse_section_enabled = ret >= 0;
+            if ret < 0 {
+                log_plugin(&format!("Failed to enable mouse section: {}", ret));
+            }
+        } else if !is_hovering && self.mouse_section_enabled && !self.mouse.is_pressed() {
             self.mpv.command(&["disable-section", "twitch_chat_mouse"]);
             self.mouse_section_enabled = false;
         }
     }
 
+    fn update_header_animation(&mut self) {
+        let now = std::time::Instant::now();
+        let elapsed = now.duration_since(self.last_header_update).as_secs_f32().min(0.05);
+        self.last_header_update = now;
+        let opacity = self.header_fade.advance(elapsed);
+        if (opacity - self.ui.header_opacity).abs() > 0.001
+            || (opacity != self.ui.header_opacity && (opacity == 0.0 || opacity == 1.0))
+        {
+            self.ui.header_opacity = opacity;
+            self.update_frame();
+        }
+    }
+
     fn perform_search(&mut self) {
         if let Some(session) = &self.session {
-            let session_start = session.session_data.session_start_ms;
-            self.ui.search_results = session.search_messages(
+            self.ui.search_results = session.search_for_video(
                 &self.ui.search_query,
-                session_start,
+                &self.current_path,
                 self.ui.offset_ms,
                 50,
             );
             self.ui.search_scroll_offset = 0;
         }
+    }
+
+    fn scroll_chat(&mut self, delta: i32) {
+        if let Some(end) = self.ui.chat_scroll_anchor {
+            let count = self.session.as_ref().map(|s| s.messages.len()).unwrap_or(0);
+            self.ui.chat_scroll_anchor = Some((end as i64 - delta as i64).clamp(0, count as i64) as usize);
+            self.ui.scroll_offset = self.ui.scroll_offset.saturating_add(delta);
+        } else {
+            let max = self.session.as_ref().map(|s| s.messages.len().min(i32::MAX as usize) as i32).unwrap_or(50000);
+            self.ui.scroll_offset = self.ui.scroll_offset.saturating_add(delta).clamp(-max, max);
+        }
+        self.ui.highlighted_message_ts = None;
+    }
+
+    fn open_chat_search_result(&mut self, result: &ui::SearchResult) {
+        if let Some(session) = &self.session {
+            if result.msg_idx < session.messages.len() {
+                self.ui.chat_scroll_anchor = Some(result.msg_idx + 1);
+                self.ui.highlighted_message_ts = Some(result.timestamp_ms);
+                let now = session.video_start_ms(&self.current_path) + self.ui.offset_ms + (self.current_time_pos * 1000.0).round() as i64;
+                let current_end = session.messages.partition_point(|message| message.timestamp_ms <= now);
+                self.ui.scroll_offset = (current_end as i64 - result.msg_idx as i64 - 1).clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+                log_plugin(&format!("Scrolled chat to search message: timestamp_ms={}", result.timestamp_ms));
+            }
+        }
+    }
+
+    fn seek_search_result(&mut self, result: &ui::SearchResult) {
+        self.ui.chat_scroll_anchor = None;
+        self.ui.highlighted_message_ts = None;
+        self.ui.scroll_offset = 0;
+        if let Some(path) = result.video_path.as_deref() {
+            let target = self.session.as_ref().and_then(|session| session.part_index(path));
+            let current = self.session.as_ref().and_then(|session| session.part_index(&self.current_path));
+            if target.is_some() && target != current {
+                let playlist_index = self.mpv.get_property_double("playlist-pos").unwrap_or(0.0) as i64;
+                let destination = playlist_index + target.unwrap() as i64 - current.unwrap_or(0) as i64;
+                self.pending_search_seek = Some(result.sec);
+                if destination >= 0 && self.mpv.command(&["playlist-play-index", &destination.to_string()]) >= 0 {
+                    return;
+                }
+                if self.mpv.command(&["loadfile", path, "replace"]) < 0 {
+                    self.pending_search_seek = None;
+                }
+                return;
+            }
+        }
+        self.mpv.seek_absolute(result.sec);
     }
 
     fn on_click_event(&mut self, explicit_x: Option<i32>, explicit_y: Option<i32>) {
@@ -422,6 +505,17 @@ impl PluginState {
             return;
         };
 
+        if self.ui.minimized {
+            let (x, y, width, height) = self.ui.overlay_geometry();
+            if mx >= x && mx < x + width as i32 && my >= y && my < y + height as i32 {
+                self.ui.restore();
+                self.update_search_keys_state();
+                self.update_mouse_hover();
+                self.update_frame();
+                log_plugin(&format!("Restored chat at ({}, {})", self.ui.panel_x, self.ui.panel_y));
+            }
+            return;
+        }
         let rel_x = (mx - self.ui.panel_x) as f32;
         let rel_y = (my - self.ui.panel_y) as f32;
 
@@ -430,7 +524,7 @@ impl PluginState {
             || rel_y < -15.0
             || rel_y > (self.ui.panel_height as f32 + 15.0)
         {
-            if self.mouse_section_enabled && !self.is_dragging {
+            if self.mouse_section_enabled && !self.mouse.is_pressed() {
                 self.mpv.command(&["disable-section", "twitch_chat_mouse"]);
                 self.mouse_section_enabled = false;
             }
@@ -460,30 +554,21 @@ impl PluginState {
             return;
         }
         if ChatRenderer::btn_close(width).contains(rel_x, rel_y) {
-            self.ui.chat_enabled = false;
-            if self.overlay_active {
-                self.mpv.overlay_remove(OVERLAY_ID);
-                self.overlay_active = false;
-            }
-            if self.mouse_section_enabled {
-                self.mpv.command(&["disable-section", "twitch_chat_mouse"]);
-                self.mouse_section_enabled = false;
-            }
+            let osd = (
+                self.mpv.get_property_double("osd-width").unwrap_or(1920.0) as i32,
+                self.mpv.get_property_double("osd-height").unwrap_or(1080.0) as i32,
+            );
+            self.ui.minimize(osd);
+            self.header_fade.hovered = false;
+            self.save_chat_settings();
             self.update_search_keys_state();
+            self.update_mouse_hover();
+            self.update_frame();
+            log_plugin("Minimized chat to Twitch button");
             return;
         }
 
-        // Header Drag Bar (any click in the top 30px that is not on a tab/close button)
-        if rel_y >= -5.0 && rel_y <= 30.0 {
-            self.is_dragging = true;
-            self.drag_start_cursor_x = mx;
-            self.drag_start_cursor_y = my;
-            self.drag_start_panel_x = self.ui.panel_x;
-            self.drag_start_panel_y = self.ui.panel_y;
-            log_plugin(&format!(
-                "Started dragging chat: cursor=({}, {}), panel=({}, {})",
-                mx, my, self.ui.panel_x, self.ui.panel_y
-            ));
+        if ChatRenderer::is_drag_handle(rel_x, rel_y, width) {
             return;
         }
 
@@ -492,24 +577,26 @@ impl PluginState {
             UiView::Chat => {
                 let height = self.ui.panel_height as f32;
                 // If scrolled (into history or future), clicking bottom banner returns to live
-                if self.ui.scroll_offset != 0 && rel_y >= height - 32.0 {
+                if (self.ui.scroll_offset != 0 || self.ui.chat_scroll_anchor.is_some()) && rel_y >= height - 32.0 {
                     self.ui.scroll_offset = 0;
+                    self.ui.chat_scroll_anchor = None;
+                    self.ui.highlighted_message_ts = None;
                     self.update_frame();
                     return;
                 }
 
-                // Hit-test messages and jump to clicked message timestamp
+                // Hit-test visible messages to select a synchronization anchor.
                 let session = match self.session.as_ref() {
                     Some(s) => s,
                     None => return,
                 };
 
                 let current_video_sec = self.current_time_pos;
-                let session_start = session.session_data.session_start_ms;
+                let session_start = session.video_start_ms(&self.current_path);
                 let current_ms = session_start
                     + self.ui.offset_ms
                     + (current_video_sec * 1000.0).round() as i64;
-                let active_msgs = session.get_messages_up_to(current_ms, self.ui.scroll_offset, 80);
+                let active_msgs = session.visible_messages(current_ms, &self.ui, 80);
 
                 let dummy_cache;
                 let emotes_ref = match self.emotes.as_ref() {
@@ -520,36 +607,32 @@ impl PluginState {
                     }
                 };
 
-                let layout_messages = self.renderer.layouter().layout_messages(
+                let layout_messages = self.renderer.layouter().layout_messages_with_icons(
                     active_msgs,
                     &session.emotes_manifest,
                     emotes_ref,
                     self.ui.panel_width as f32,
                     self.ui.font_size,
                     self.ui.emotes_enabled,
+                    self.ui.badges_enabled,
                 );
 
-                let visible_top = 32.0;
-                let ban_h = if self.ui.scroll_offset != 0 { 28.0 } else { 0.0 };
-                let visible_bottom = height - ban_h - 4.0;
-                let total_msg_h = layout_messages.last().map(|m| m.bottom_y).unwrap_or(0.0);
-                let available_h = visible_bottom - visible_top;
-                let base_y = if total_msg_h > available_h {
-                    visible_top + (available_h - total_msg_h)
-                } else {
-                    visible_top + 4.0
-                };
+                let viewport = ChatViewport::new(&self.ui, layout_messages.last().map(|m| m.bottom_y).unwrap_or(0.0));
+                if rel_x < 0.0 || rel_x >= width || !viewport.contains_y(rel_y) {
+                    return;
+                }
 
                 for msg in &layout_messages {
-                    let msg_top = base_y + msg.top_y;
-                    let msg_bottom = base_y + msg.bottom_y;
+                    let msg_top = viewport.base_y + msg.top_y;
+                    let msg_bottom = viewport.base_y + msg.bottom_y;
 
                     if rel_y >= msg_top && rel_y <= msg_bottom {
                         if msg.msg_index < active_msgs.len() {
                             let clicked_msg = &active_msgs[msg.msg_index];
                             self.ui.selected_sync_msg = Some(clicked_msg.clone());
-                            let seek_sec = ((clicked_msg.timestamp_ms - session_start - self.ui.offset_ms) as f64 / 1000.0).max(0.0);
-                            self.mpv.seek_absolute(seek_sec);
+                            let preview: String = clicked_msg.text.chars().take(48).collect();
+                            self.mpv.osd_message(&format!("Якорь выбран: {}: {}", clicked_msg.display_name, preview), 1500);
+                            log_plugin(&format!("Selected sync anchor: timestamp_ms={}", clicked_msg.timestamp_ms));
                             self.update_frame();
                             return;
                         }
@@ -566,16 +649,31 @@ impl PluginState {
     }
 
     fn handle_settings_click(&mut self, rx: f32, ry: f32) {
+        if ry < 32.0 || ry >= self.ui.panel_height as f32 {
+            return;
+        }
+        let ry = ry + self.ui.settings_scroll_offset.min(max_settings_scroll(self.ui.panel_height));
+        if ChatRenderer::btn_text_effect(self.ui.panel_width as f32).contains(rx, ry) {
+            self.ui.text_effect = self.ui.text_effect.next();
+            self.save_chat_settings();
+            self.update_frame();
+            return;
+        }
+        for (button, delta) in [(ChatRenderer::btn_outline_minus(), -0.5), (ChatRenderer::btn_outline_plus(), 0.5)] {
+            if button.contains(rx, ry) {
+                self.ui.outline_width = clamp_outline_width(self.ui.outline_width + delta);
+                self.save_chat_settings();
+                self.update_frame();
+                return;
+            }
+        }
         let width = self.ui.panel_width as f32;
         let mut cur_y = 36.0 + 24.0; // after title
 
         // Row 1: Reset offset
         if ChatRenderer::btn_offset_reset().contains(rx, ry) {
             self.ui.offset_ms = 0;
-            let video_filename = Path::new(&self.current_path)
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_default();
+            let video_filename = self.current_path.clone();
             if let Some(session) = &mut self.session {
                 session.save_offset(&video_filename, 0);
             }
@@ -590,10 +688,7 @@ impl PluginState {
             let hb = ChatRenderer::btn_offset_step(i, cur_y);
             if hb.contains(rx, ry) {
                 self.ui.offset_ms += delta;
-                let video_filename = Path::new(&self.current_path)
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default();
+                let video_filename = self.current_path.clone();
                 if let Some(session) = &mut self.session {
                     session.save_offset(&video_filename, self.ui.offset_ms);
                 }
@@ -606,11 +701,13 @@ impl PluginState {
         // Row 2: Font Size [A-] (65, cur_y, 28, 22), [A+] (98, cur_y, 28, 22)
         if HitBox::new(65.0, cur_y, 28.0, 22.0).contains(rx, ry) {
             self.ui.font_size = (self.ui.font_size - 1.0).max(11.0);
+            self.save_chat_settings();
             self.update_frame();
             return;
         }
         if HitBox::new(98.0, cur_y, 28.0, 22.0).contains(rx, ry) {
             self.ui.font_size = (self.ui.font_size + 1.0).min(36.0);
+            self.save_chat_settings();
             self.update_frame();
             return;
         }
@@ -618,11 +715,13 @@ impl PluginState {
         // Panel Width: [W-] (230, cur_y, 28, 22), [W+] (262, cur_y, 28, 22)
         if HitBox::new(230.0, cur_y, 28.0, 22.0).contains(rx, ry) {
             self.ui.panel_width = (self.ui.panel_width.saturating_sub(40)).max(260);
+            self.save_chat_settings();
             self.update_frame();
             return;
         }
         if HitBox::new(262.0, cur_y, 28.0, 22.0).contains(rx, ry) {
             self.ui.panel_width = (self.ui.panel_width + 40).min(1200);
+            self.save_chat_settings();
             self.update_frame();
             return;
         }
@@ -631,11 +730,13 @@ impl PluginState {
         // Row 3: Panel Height: [H-] (65, cur_y, 28, 22), [H+] (98, cur_y, 28, 22)
         if HitBox::new(65.0, cur_y, 28.0, 22.0).contains(rx, ry) {
             self.ui.panel_height = (self.ui.panel_height.saturating_sub(40)).max(220);
+            self.save_chat_settings();
             self.update_frame();
             return;
         }
         if HitBox::new(98.0, cur_y, 28.0, 22.0).contains(rx, ry) {
             self.ui.panel_height = (self.ui.panel_height + 40).min(1400);
+            self.save_chat_settings();
             self.update_frame();
             return;
         }
@@ -651,46 +752,20 @@ impl PluginState {
                 }
             }
             self.ui.bg_opacity = OP_PRESETS[next_idx];
+            self.save_chat_settings();
             self.update_frame();
             return;
         }
         cur_y += 34.0;
 
-        // Row 4: Position Presets: [↖ ВЛ] [↙ НЛ] [↗ ВП] [↘ НП]
-        let osd_w = self.mpv.get_property_double("osd-width").unwrap_or(1920.0) as i32;
-        let osd_h = self.mpv.get_property_double("osd-height").unwrap_or(1080.0) as i32;
-        let mut px = 75.0;
-        // 0: TL
-        if HitBox::new(px, cur_y, 48.0, 22.0).contains(rx, ry) {
-            self.ui.panel_x = 24;
-            self.ui.panel_y = 60;
+        if ChatRenderer::btn_emotes().contains(rx, ry) {
+            self.ui.emotes_enabled = !self.ui.emotes_enabled;
             self.save_chat_settings();
             self.update_frame();
             return;
         }
-        px += 54.0;
-        // 1: BL
-        if HitBox::new(px, cur_y, 48.0, 22.0).contains(rx, ry) {
-            self.ui.panel_x = 24;
-            self.ui.panel_y = (osd_h - self.ui.panel_height as i32 - 40).max(40);
-            self.save_chat_settings();
-            self.update_frame();
-            return;
-        }
-        px += 54.0;
-        // 2: TR
-        if HitBox::new(px, cur_y, 48.0, 22.0).contains(rx, ry) {
-            self.ui.panel_x = (osd_w - self.ui.panel_width as i32 - 24).max(24);
-            self.ui.panel_y = 60;
-            self.save_chat_settings();
-            self.update_frame();
-            return;
-        }
-        px += 54.0;
-        // 3: BR
-        if HitBox::new(px, cur_y, 48.0, 22.0).contains(rx, ry) {
-            self.ui.panel_x = (osd_w - self.ui.panel_width as i32 - 24).max(24);
-            self.ui.panel_y = (osd_h - self.ui.panel_height as i32 - 40).max(40);
+        if ChatRenderer::btn_badges().contains(rx, ry) {
+            self.ui.badges_enabled = !self.ui.badges_enabled;
             self.save_chat_settings();
             self.update_frame();
             return;
@@ -704,7 +779,7 @@ impl PluginState {
                 Some(m.clone())
             } else if let Some(session) = &self.session {
                 // If no message explicitly clicked yet, find the message nearest to current playback position
-                let session_start = session.session_data.session_start_ms;
+                let session_start = session.video_start_ms(&self.current_path);
                 let cur_ts = session_start + (self.current_time_pos * 1000.0).round() as i64 + self.ui.offset_ms;
                 let msgs = session.get_messages_up_to(cur_ts, 0, 1);
                 msgs.last().cloned()
@@ -716,15 +791,11 @@ impl PluginState {
                 self.ui.selected_sync_msg = Some(anchor_msg.clone());
                 let target_ts = anchor_msg.timestamp_ms;
                 let current_video_sec = self.current_time_pos;
-                let video_filename = Path::new(&self.current_path)
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default();
+                let video_filename = self.current_path.clone();
 
                 if let Some(session) = &mut self.session {
                     let success = session.calibrate_anchor(target_ts, current_video_sec, &video_filename);
                     self.ui.offset_ms = 0;
-                    self.update_frame();
 
                     let vid_str = session::format_hms(current_video_sec);
                     let author = &anchor_msg.display_name;
@@ -740,7 +811,7 @@ impl PluginState {
                             vid_str,
                             author,
                             text_snip,
-                            session.session_data.session_start_ms,
+                            session.video_start_ms(&self.current_path),
                             fname
                         );
                         self.mpv.osd_message(&msg, 3500);
@@ -753,6 +824,7 @@ impl PluginState {
                         self.mpv.osd_message(&msg, 3000);
                         log_plugin(&format!("calibrate_anchor write failed: {:?}", session.session_file));
                     }
+                    self.update_frame();
                 }
             } else {
                 self.mpv.osd_message("Сначала кликните по сообщению в чате для выбора якоря!", 2500);
@@ -761,49 +833,17 @@ impl PluginState {
     }
 
     fn handle_search_click(&mut self, rx: f32, ry: f32) {
-        let width = self.ui.panel_width as f32;
-        let height = self.ui.panel_height as f32;
-
-        // 1. Action Buttons: [RU ⇄ EN], [⌫ Стереть], [🗑 Очистить] at y=72.0
-        let btn_y = 72.0;
-        if HitBox::new(12.0, btn_y, 76.0, 22.0).contains(rx, ry) {
-            self.ui.search_query = swap_keyboard_layout(&self.ui.search_query);
-            self.perform_search();
-            self.update_frame();
-            return;
+        let Some(hit) = search_result_hit(&self.ui, rx, ry) else { return; };
+        let result = match hit {
+            SearchHit::Message(index) | SearchHit::Timestamp(index) => self.ui.search_results[index].clone(),
+        };
+        match hit {
+            SearchHit::Message(_) => self.open_chat_search_result(&result),
+            SearchHit::Timestamp(_) => self.seek_search_result(&result),
         }
-        if HitBox::new(94.0, btn_y, 76.0, 22.0).contains(rx, ry) {
-            self.ui.search_query.pop();
-            self.perform_search();
-            self.update_frame();
-            return;
-        }
-        if HitBox::new(176.0, btn_y, 76.0, 22.0).contains(rx, ry) {
-            self.ui.search_query.clear();
-            self.ui.search_results.clear();
-            self.update_frame();
-            return;
-        }
-
-        // 2. Results list cards: start at y=102.0
-        let cur_y = 102.0;
-        let item_h = 36.0;
-
-        let visible_items = ((height - cur_y) / item_h) as usize;
-        let start_idx = self.ui.search_scroll_offset;
-        let end_idx = (start_idx + visible_items).min(self.ui.search_results.len());
-
-        for (i, res) in self.ui.search_results[start_idx..end_idx].iter().enumerate() {
-            let item_y = cur_y + (i as f32 * item_h);
-            let hb = HitBox::new(12.0, item_y, width - 24.0, item_h - 4.0);
-            if hb.contains(rx, ry) {
-                self.mpv.seek_absolute(res.sec);
-                self.ui.current_view = UiView::Chat;
-                self.update_search_keys_state();
-                self.update_frame();
-                return;
-            }
-        }
+        self.ui.current_view = UiView::Chat;
+        self.update_search_keys_state();
+        self.update_frame();
     }
 
     fn parse_script_opts(&mut self, opts: &str) {
@@ -815,6 +855,7 @@ impl PluginState {
                 match key {
                     "twitch_session" => {
                         log_plugin(&format!("twitch_session specified: {}", val));
+                        self.explicit_session = Some(PathBuf::from(val));
                         self.on_path_changed(val);
                     }
                     "twitch_chat" => {
@@ -853,6 +894,16 @@ impl PluginState {
                             self.ui.bg_opacity = op;
                         }
                     }
+                    "twitch_text_effect" => {
+                        if let Some(effect) = TextEffect::parse(val) {
+                            self.ui.text_effect = effect;
+                        }
+                    }
+                    "twitch_outline_width" => {
+                        if let Ok(width) = val.parse::<f32>() {
+                            self.ui.outline_width = clamp_outline_width(width);
+                        }
+                    }
                     "twitch_offset" => {
                         if let Ok(sec) = val.parse::<f64>() {
                             self.ui.offset_ms = (sec * 1000.0).round() as i64;
@@ -869,20 +920,11 @@ impl PluginState {
             return;
         }
         log_plugin(&format!("on_path_changed: {}", new_path));
+        self.cancel_mouse();
         let path = PathBuf::from(new_path);
-        if let Some(mgr) = SessionManager::try_load(&path) {
-            let filename = path
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_default();
-
-            let initial_offset = mgr
-                .session_data
-                .offsets_ms
-                .get(&filename)
-                .or_else(|| mgr.session_data.offsets_ms.get("default"))
-                .copied()
-                .unwrap_or(0);
+        let load_path = self.explicit_session.as_ref().unwrap_or(&path);
+        if let Some(mgr) = SessionManager::try_load(load_path) {
+            let initial_offset = mgr.video_offset_ms(new_path);
             self.ui.offset_ms = initial_offset;
 
             log_plugin(&format!(
@@ -916,10 +958,37 @@ impl PluginState {
                     if let Some(op) = val.get("chat_bg_opacity").and_then(|v| v.as_f64()) {
                         self.ui.bg_opacity = op as f32;
                     }
+                    if let Some(enabled) = val.get("emotes_enabled").and_then(|v| v.as_bool()) {
+                        self.ui.emotes_enabled = enabled;
+                    }
+                    if let Some(enabled) = val.get("badges_enabled").and_then(|v| v.as_bool()) {
+                        self.ui.badges_enabled = enabled;
+                    }
+                    if let Some(effect) = val.get("chat_text_effect").and_then(|v| v.as_str()).and_then(TextEffect::parse) {
+                        self.ui.text_effect = effect;
+                    }
+                    if let Some(position) = val.get("chat_minimized_position").and_then(|v| v.as_array()) {
+                        if let (Some(x), Some(y)) = (position.get(0).and_then(|v| v.as_i64()), position.get(1).and_then(|v| v.as_i64())) {
+                            self.ui.minimized_position = Some((x as i32, y as i32));
+                        }
+                    }
+                    if let Some(width) = val.get("chat_outline_width").and_then(|v| v.as_f64()) {
+                        self.ui.outline_width = clamp_outline_width(width as f32);
+                    }
                 }
             }
 
-            self.emotes = Some(EmoteCache::new(&mgr.session_dir));
+            let cache_directory = mgr.cache_directory();
+            self.emotes = Some(EmoteCache::with_cache_dir(&mgr.session_dir, cache_directory.as_deref()));
+            let session_changed = self.session.as_ref().map(|session| session.session_file != mgr.session_file).unwrap_or(true);
+            if session_changed {
+                self.ui.selected_sync_msg = None;
+                self.ui.scroll_offset = 0;
+                self.ui.chat_scroll_anchor = None;
+                self.ui.highlighted_message_ts = None;
+                self.ui.search_results.clear();
+                self.ui.search_scroll_offset = 0;
+            }
             self.session = Some(mgr);
             self.current_path = new_path.to_string();
             self.update_frame();
@@ -942,6 +1011,14 @@ impl PluginState {
             return;
         }
 
+        if self.ui.minimized {
+            let cache = match self.emotes.as_ref() { Some(cache) => cache, None => return };
+            let Some(bitmap) = self.renderer.render_frame(&[], cache, &self.ui, "") else { return; };
+            let (x, y, width, height) = self.ui.overlay_geometry();
+            let ret = self.mpv.overlay_add_bgra(OVERLAY_ID, x, y, &bitmap, width, height, width * 4);
+            if ret >= 0 { self.overlay_active = true; }
+            return;
+        }
         let session = match self.session.as_mut() {
             Some(s) => s,
             None => return,
@@ -952,21 +1029,22 @@ impl PluginState {
         };
 
         let current_video_sec = self.current_time_pos;
-        let session_start = session.session_data.session_start_ms;
+        let session_start = session.video_start_ms(&self.current_path);
         let current_ms =
             session_start + self.ui.offset_ms + (current_video_sec * 1000.0).round() as i64;
 
         // Fetch recent messages with scroll offset applied
-        let active_msgs = session.get_messages_up_to(current_ms, self.ui.scroll_offset, 80);
+        let active_msgs = session.visible_messages(current_ms, &self.ui, 80);
 
         // Layout messages with badges and inline emotes
-        let layout_messages = self.renderer.layouter().layout_messages(
+        let layout_messages = self.renderer.layouter().layout_messages_with_icons(
             active_msgs,
             &session.emotes_manifest,
             emotes,
             self.ui.panel_width as f32,
             self.ui.font_size,
             self.ui.emotes_enabled,
+            self.ui.badges_enabled,
         );
 
         let channel = self
@@ -1044,13 +1122,14 @@ pub unsafe extern "C" fn mpv_open_cplugin(ctx: MpvHandleRaw) -> c_int {
     // Main event loop (runs in mpv's dedicated plugin thread)
     loop {
         // Continuously update position if dragging
-        state.update_drag();
+        state.update_drag_position();
 
         // Dynamically update hover state so mouse section is enabled ONLY when cursor is over the panel
         state.update_mouse_hover();
+        state.update_header_animation();
         state.update_search_keys_state();
 
-        let wait_timeout = if state.is_dragging { 0.01 } else { 0.04 };
+        let wait_timeout = if state.mouse.is_dragging() { 0.01 } else if state.header_fade.is_animating() { 0.016 } else { 0.04 };
         let event_ptr = state.mpv.wait_event(wait_timeout);
         if event_ptr.is_null() {
             // Even on timeout, if in Search view, refresh overlay for cursor blink animation
@@ -1063,6 +1142,7 @@ pub unsafe extern "C" fn mpv_open_cplugin(ctx: MpvHandleRaw) -> c_int {
         let event = &*event_ptr;
         match event.event_id {
             MpvEventId::Shutdown => {
+                state.cancel_mouse();
                 log_plugin("Shutdown event received, exiting loop");
                 break;
             }
@@ -1099,7 +1179,7 @@ pub unsafe extern "C" fn mpv_open_cplugin(ctx: MpvHandleRaw) -> c_int {
                     }
                     5 => {
                         // mouse-pos changed: instantly update dragging and hover detection
-                        state.update_drag();
+                        state.update_drag_position();
                         state.update_mouse_hover();
                     }
                     _ => {}
@@ -1124,8 +1204,12 @@ pub unsafe extern "C" fn mpv_open_cplugin(ctx: MpvHandleRaw) -> c_int {
                 if let Some(p) = state.mpv.get_property_string("path") {
                     state.on_path_changed(&p);
                 }
+                if let Some(seconds) = state.pending_search_seek.take() {
+                    state.mpv.seek_absolute(seconds);
+                }
             }
             MpvEventId::EndFile => {
+                state.cancel_mouse();
                 state.playback_active = false;
                 if state.overlay_active {
                     state.mpv.overlay_remove(OVERLAY_ID);
@@ -1149,36 +1233,41 @@ pub unsafe extern "C" fn mpv_open_cplugin(ctx: MpvHandleRaw) -> c_int {
 
                     if let Some(first_arg) = args.first() {
                         match first_arg.as_str() {
+                            "key-binding" => {
+                                if args.get(1).map(String::as_str) == Some("twitch_chat_mouse") {
+                                    if let Some(key_state) = args.get(2) {
+                                        state.on_mouse_binding(key_state);
+                                    }
+                                }
+                            }
                             "click" | "twitch_chat/click" | "twitch_chat_click" => {
                                 let exp_x = args.get(1).and_then(|s| s.parse::<f64>().ok()).map(|f| f.round() as i32);
                                 let exp_y = args.get(2).and_then(|s| s.parse::<f64>().ok()).map(|f| f.round() as i32);
                                 state.on_click_event(exp_x, exp_y);
                             }
                             "mouse_up" | "twitch_chat/mouse_up" | "twitch_chat_mouse_up" => {
-                                if state.is_dragging {
-                                    state.is_dragging = false;
-                                    state.save_chat_settings();
-                                    log_plugin("Finished dragging chat (mouse_up event), saved position");
-                                }
+                                state.on_mouse_binding("um-");
                             }
                             "wheel_up" | "twitch_chat/wheel_up" | "twitch_chat_wheel_up" => {
-                                if state.ui.current_view == UiView::Search {
+                                if state.ui.minimized { continue; }
+                                if state.ui.current_view == UiView::Settings {
+                                    state.ui.settings_scroll_offset = (state.ui.settings_scroll_offset - 32.0).max(0.0);
+                                } else if state.ui.current_view == UiView::Search {
                                     state.ui.search_scroll_offset = state.ui.search_scroll_offset.saturating_sub(1);
                                 } else {
-                                    // Scroll backward in time (history)
-                                    let max_past = state.session.as_ref().map(|s| s.messages.len() as i32).unwrap_or(50000);
-                                    state.ui.scroll_offset = (state.ui.scroll_offset + 4).min(max_past);
+                                    state.scroll_chat(4);
                                 }
                                 state.update_frame();
                             }
                             "wheel_down" | "twitch_chat/wheel_down" | "twitch_chat_wheel_down" => {
-                                if state.ui.current_view == UiView::Search {
+                                if state.ui.minimized { continue; }
+                                if state.ui.current_view == UiView::Settings {
+                                    state.ui.settings_scroll_offset = (state.ui.settings_scroll_offset + 32.0).min(max_settings_scroll(state.ui.panel_height));
+                                } else if state.ui.current_view == UiView::Search {
                                     state.ui.search_scroll_offset = (state.ui.search_scroll_offset + 1)
                                         .min(state.ui.search_results.len().saturating_sub(1));
                                 } else {
-                                    // Scroll forward in time (future messages)
-                                    let max_future = state.session.as_ref().map(|s| s.messages.len() as i32).unwrap_or(50000);
-                                    state.ui.scroll_offset = (state.ui.scroll_offset - 4).max(-max_future);
+                                    state.scroll_chat(-4);
                                 }
                                 state.update_frame();
                             }
@@ -1206,8 +1295,8 @@ pub unsafe extern "C" fn mpv_open_cplugin(ctx: MpvHandleRaw) -> c_int {
                             }
                             "sk_enter" | "twitch_chat/sk_enter" | "twitch_chat_enter" | "twitch_chat/enter" => {
                                 if !state.ui.search_results.is_empty() {
-                                    let sec = state.ui.search_results[0].sec;
-                                    state.mpv.seek_absolute(sec);
+                                    let result = state.ui.search_results[0].clone();
+                                    state.open_chat_search_result(&result);
                                     state.ui.current_view = UiView::Chat;
                                     state.update_search_keys_state();
                                     state.update_frame();
@@ -1215,7 +1304,12 @@ pub unsafe extern "C" fn mpv_open_cplugin(ctx: MpvHandleRaw) -> c_int {
                             }
                             "twitch_chat_ignore" => {}
                             "toggle" | "twitch_chat/toggle" => {
-                                state.ui.chat_enabled = !state.ui.chat_enabled;
+                                if state.ui.minimized {
+                                    state.ui.restore();
+                                    state.ui.chat_enabled = true;
+                                } else {
+                                    state.ui.chat_enabled = !state.ui.chat_enabled;
+                                }
                                 state.update_search_keys_state();
                                 state.update_frame();
                             }
