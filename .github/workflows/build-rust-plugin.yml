@@ -103,5 +103,6 @@ jobs:
           path: |
             ${{ steps.verify.outputs.dll_dir }}/twitch_chat.dll
             ${{ steps.verify.outputs.dll_dir }}/*.pdb
+            ${{ steps.proj.outputs.crate_dir }}/assets/INTER-LICENSE.txt
           if-no-files-found: error
           retention-days: 90

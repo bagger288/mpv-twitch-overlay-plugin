@@ -5,17 +5,50 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tiny_skia::Pixmap;
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explicit_cache_root_is_used_and_empty_candidate_does_not_mask_parent() {
+        let root = std::env::temp_dir().join(format!("mpv-cache-root-{}", std::process::id()));
+        let session = root.join("records/session");
+        let custom = root.join("custom");
+        std::fs::create_dir_all(session.join("emote_cache")).unwrap();
+        std::fs::create_dir_all(custom.join("7tv")).unwrap();
+        let file = custom.join("7tv/test.png");
+        let mut pixmap = Pixmap::new(56, 56).unwrap();
+        pixmap.fill(tiny_skia::Color::from_rgba8(255, 120, 80, 255));
+        pixmap.save_png(&file).unwrap();
+        let cache = EmoteCache::with_cache_dir(&session, Some(&custom));
+        assert_eq!(cache.resolve_path("7tv/test.png"), Some(file.clone()));
+        assert!(cache.get_or_load("7tv/test.png", 28).is_some());
+        assert!(cache.resolve_path("../test.png").is_none());
+        std::fs::remove_file(file).unwrap();
+        std::fs::remove_dir(custom.join("7tv")).unwrap();
+        std::fs::remove_dir(custom).unwrap();
+        std::fs::remove_dir(session.join("emote_cache")).unwrap();
+        std::fs::remove_dir(session).unwrap();
+        std::fs::remove_dir(root.join("records")).unwrap();
+        std::fs::remove_dir(root).unwrap();
+    }
+}
+
 pub struct EmoteCache {
     session_dir: PathBuf,
-    base_cache_dir: PathBuf,
+    cache_candidates: Vec<PathBuf>,
     pixmap_cache: Mutex<HashMap<(String, u32), Pixmap>>,
     dimension_cache: Mutex<HashMap<(String, u32), u32>>,
 }
 
 impl EmoteCache {
     pub fn new(session_dir: &Path) -> Self {
-        // Search for emote_cache dir in session_dir and parent directories
+        Self::with_cache_dir(session_dir, None)
+    }
+
+    pub fn with_cache_dir(session_dir: &Path, explicit: Option<&Path>) -> Self {
         let mut candidates = Vec::new();
+        if let Some(path) = explicit { candidates.push(path.to_path_buf()); }
         candidates.push(session_dir.join("emote_cache"));
 
         if let Some(p1) = session_dir.parent() {
@@ -32,21 +65,9 @@ impl EmoteCache {
         candidates.push(PathBuf::from("../emote_cache"));
         candidates.push(PathBuf::from("../../emote_cache"));
 
-        let chosen = candidates
-            .into_iter()
-            .find(|p| p.is_dir() && p.exists())
-            .unwrap_or_else(|| {
-                // Default to project root: session_dir/../../emote_cache
-                session_dir
-                    .parent()
-                    .and_then(|p| p.parent())
-                    .map(|p| p.join("emote_cache"))
-                    .unwrap_or_else(|| session_dir.join("emote_cache"))
-            });
-
         Self {
             session_dir: session_dir.to_path_buf(),
-            base_cache_dir: chosen,
+            cache_candidates: candidates,
             pixmap_cache: Mutex::new(HashMap::new()),
             dimension_cache: Mutex::new(HashMap::new()),
         }
@@ -55,33 +76,16 @@ impl EmoteCache {
     /// Resolves relative or absolute path against base_cache_dir or session_dir with extension fallbacks
     pub fn resolve_path(&self, rel_or_abs_path: &str) -> Option<PathBuf> {
         let p = Path::new(rel_or_abs_path);
-        if p.is_absolute() && p.exists() {
-            return Some(p.to_path_buf());
+        if p.is_absolute() && p.is_file() { return Some(p.to_path_buf()); }
+        if p.components().any(|component| matches!(component, std::path::Component::ParentDir)) { return None; }
+        for directory in &self.cache_candidates {
+            let path = directory.join(p);
+            for candidate in [&path, &path.with_extension("png"), &path.with_extension("webp")] {
+                if candidate.is_file() { return Some(candidate.to_path_buf()); }
+            }
         }
-
-        // 1. Direct path in emote_cache
-        let in_cache = self.base_cache_dir.join(rel_or_abs_path);
-        if in_cache.exists() {
-            return Some(in_cache);
-        }
-
-        // 2. Extension fallbacks (.png, .webp) in emote_cache
-        let with_png = in_cache.with_extension("png");
-        if with_png.exists() {
-            return Some(with_png);
-        }
-        let with_webp = in_cache.with_extension("webp");
-        if with_webp.exists() {
-            return Some(with_webp);
-        }
-
-        // 3. Fallback inside session_dir
-        let in_session = self.session_dir.join(rel_or_abs_path);
-        if in_session.exists() {
-            return Some(in_session);
-        }
-
-        None
+        let path = self.session_dir.join(p);
+        if path.is_file() { Some(path) } else { None }
     }
 
     /// Queries exact width for an emote image at given target_height (proportional aspect ratio)

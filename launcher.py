@@ -9,6 +9,9 @@ Twitch Stream & Chat Overlay Launcher (Tkinter GUI)
 """
 
 import datetime
+import queue
+import time
+from twitch_auth import refresh_twitch_token, TokenRefreshError
 import json
 import os
 from pathlib import Path
@@ -26,7 +29,7 @@ CONFIG_FILE = SCRIPT_DIR / "config.json"
 LUA_SCRIPT = SCRIPT_DIR / "twitch_chat.lua"
 LUA_INPUT_SCRIPT = SCRIPT_DIR / "twitch_chat_input.lua"
 RUST_DLL = SCRIPT_DIR / "twitch_chat.dll"
-RUST_DLL_TARGET = SCRIPT_DIR / "rust_plugin" / "target" / "release" / "twitch_chat.dll"
+RUST_DLL_TARGET = SCRIPT_DIR / "build" / "twitch_chat.dll"
 
 
 def load_config() -> dict:
@@ -49,11 +52,15 @@ def load_config() -> dict:
 
 
 def save_config(cfg: dict):
+    temp = CONFIG_FILE.with_name(CONFIG_FILE.name + ".tmp")
     try:
-        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-            json.dump(cfg, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print(f"Error saving config: {e}")
+        with open(temp, "w", encoding="utf-8") as file:
+            json.dump(cfg, file, ensure_ascii=False, indent=2)
+        os.replace(temp, CONFIG_FILE)
+        return True
+    except OSError:
+        print("[Launcher] Не удалось сохранить config.json")
+        return False
 
 
 def format_duration(seconds: float) -> str:
@@ -98,8 +105,8 @@ class TwitchRecordsApp:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title("Twitch Stream & Chat Overlay Launcher")
-        self.root.geometry("980x640")
-        self.root.minsize(800, 500)
+        self.root.geometry("600x780")
+        self.root.minsize(500, 640)
 
         self.config = load_config()
         self.records_base = SCRIPT_DIR / self.config.get("records_dir", "records")
@@ -108,10 +115,18 @@ class TwitchRecordsApp:
         self.channels_data: Dict[str, List[dict]] = {}
         self.selected_channel: Optional[str] = None
         self.active_recording_proc: Optional[subprocess.Popen] = None
+        self.token_refresh_busy = False
+        self.token_results = queue.Queue()
+        self.ui_results = queue.Queue()
+        self.import_busy = False
+        self.waiting_for_token = []
+        self.root.after(100, self._poll_ui_results)
 
         self._apply_theme()
         self._build_ui()
         self.refresh_records()
+        self.root.after(100, self._poll_token_results)
+        self.root.after(200, self._refresh_token_on_startup)
 
     def _apply_theme(self):
         self.style = ttk.Style()
@@ -221,28 +236,61 @@ class TwitchRecordsApp:
         self.style.map("Treeview", background=[("selected", self.accent_purple)], foreground=[("selected", "#ffffff")])
         self.style.configure("Treeview.Heading", background="#2b2b30", foreground="#ffffff", font=("Segoe UI", 9, "bold"))
 
+        self.style.configure("TLabelframe", background=self.bg_color, bordercolor="#34343d")
+        self.style.configure("TLabelframe.Label", background=self.bg_color, foreground="#bf94ff", font=("Segoe UI", 9, "bold"))
+        self.style.configure("Compact.TButton", padding=[7, 3])
+        self.style.configure("Dim.TLabel", foreground=self.text_dim)
+        self.style.configure("TEntry", padding=3)
+        self.style.configure("TCombobox", padding=3)
+
+    def _scrollable_frame(self, parent):
+        host = ttk.Frame(parent)
+        host.pack(fill=tk.BOTH, expand=True)
+        canvas = tk.Canvas(host, bg=self.bg_color, highlightthickness=0, borderwidth=0)
+        scrollbar = ttk.Scrollbar(host, orient=tk.VERTICAL, command=canvas.yview)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        content = ttk.Frame(canvas, padding=8)
+        window = canvas.create_window((0, 0), window=content, anchor="nw")
+        content.bind("<Configure>", lambda event: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda event: canvas.itemconfigure(window, width=event.width))
+
+        def wheel(event):
+            if canvas.winfo_exists() and canvas.winfo_ismapped():
+                if content.winfo_reqheight() > canvas.winfo_height():
+                    canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
+
+        def install_wheel(widget):
+            widget.bind("<MouseWheel>", wheel, add="+")
+            for child in widget.winfo_children():
+                install_wheel(child)
+
+        self.root.after_idle(lambda: install_wheel(content))
+        return content
+
     def _build_ui(self):
         # Header bar
-        header = ttk.Frame(self.root, padding=12)
+        header = ttk.Frame(self.root, padding=(12, 8))
         header.pack(fill=tk.X)
 
         title = tk.Label(
             header,
-            text="Twitch Stream & Chat Player",
-            font=("Segoe UI", 15, "bold"),
+            text="Twitch · mpv",
+            font=("Segoe UI", 14, "bold"),
             bg=self.bg_color,
             fg="#bf94ff",
         )
-        title.pack(side=tk.LEFT)
+        title.pack(anchor=tk.W)
 
         subtitle = tk.Label(
             header,
-            text="mpv Overlay • 7TV/BTTV/FFZ Emotes • Badges • Log Importer",
+            text="Записи, чат и синхронизация",
             font=("Segoe UI", 9),
             bg=self.bg_color,
             fg=self.text_dim,
         )
-        subtitle.pack(side=tk.LEFT, padx=12, pady=4)
+        subtitle.pack(anchor=tk.W, pady=(2, 0))
 
         # Tabbed Notebook
         self.notebook = ttk.Notebook(self.root)
@@ -250,19 +298,19 @@ class TwitchRecordsApp:
 
         # Tab 1: Recordings & Player
         self.tab_records = ttk.Frame(self.notebook, padding=10)
-        self.notebook.add(self.tab_records, text=" 📺 Записи каналов ")
+        self.notebook.add(self.tab_records, text="Записи")
 
         # Tab 2: Importer (bestlogs)
         self.tab_import = ttk.Frame(self.notebook, padding=10)
-        self.notebook.add(self.tab_import, text=" 📥 Импорт логов ")
+        self.notebook.add(self.tab_import, text="Импорт")
 
         # Tab 3: Live Recorder
         self.tab_record = ttk.Frame(self.notebook, padding=10)
-        self.notebook.add(self.tab_record, text=" 🔴 Запись стрима ")
+        self.notebook.add(self.tab_record, text="Запись")
 
         # Tab 4: Settings
         self.tab_settings = ttk.Frame(self.notebook, padding=10)
-        self.notebook.add(self.tab_settings, text=" ⚙️ Настройки ")
+        self.notebook.add(self.tab_settings, text="Настройки")
 
         self._build_records_tab()
         self._build_import_tab()
@@ -270,295 +318,127 @@ class TwitchRecordsApp:
         self._build_settings_tab()
 
     def _build_records_tab(self):
-        paned = tk.PanedWindow(self.tab_records, orient=tk.HORIZONTAL, bg=self.card_bg, sashwidth=4)
-        paned.pack(fill=tk.BOTH, expand=True)
+        self.tab_records.rowconfigure(0, weight=1)
+        self.tab_records.columnconfigure(0, weight=1)
+        paned = tk.PanedWindow(self.tab_records, orient=tk.VERTICAL, bg=self.card_bg, sashwidth=5)
+        paned.grid(row=0, column=0, sticky="nsew")
 
-        # Left pane: Channels List
-        left_frame = ttk.Frame(paned, padding=8)
-        paned.add(left_frame, minsize=200, width=240)
-
-        ch_header = ttk.Label(left_frame, text="Каналы", font=("Segoe UI", 11, "bold"))
-        ch_header.pack(anchor=tk.W, pady=(0, 6))
-
-        self.channel_listbox = tk.Listbox(
-            left_frame,
-            bg=self.card_bg,
-            fg=self.text_color,
-            selectbackground=self.accent_purple,
-            selectforeground="#ffffff",
-            highlightthickness=0,
-            borderwidth=0,
-            font=("Segoe UI", 10),
-        )
+        left_frame = ttk.Frame(paned, padding=6)
+        paned.add(left_frame, minsize=80, height=150)
+        ttk.Label(left_frame, text="КАНАЛЫ", font=("Segoe UI", 9, "bold"), foreground=self.text_dim).pack(anchor=tk.W, pady=(0, 6))
+        channel_scroll = ttk.Scrollbar(left_frame, orient=tk.VERTICAL)
+        channel_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.channel_listbox = tk.Listbox(left_frame, bg=self.card_bg, fg=self.text_color,
+            selectbackground=self.accent_purple, selectforeground="#ffffff", highlightthickness=0,
+            borderwidth=0, font=("Segoe UI", 10), width=16, exportselection=False,
+            yscrollcommand=channel_scroll.set)
         self.channel_listbox.pack(fill=tk.BOTH, expand=True)
+        channel_scroll.configure(command=self.channel_listbox.yview)
         self.channel_listbox.bind("<<ListboxSelect>>", self._on_channel_selected)
 
-        # Right pane: Recordings table & launch bar
-        right_frame = ttk.Frame(paned, padding=8)
-        paned.add(right_frame, minsize=500)
-
-        rec_header_frame = ttk.Frame(right_frame)
-        rec_header_frame.pack(fill=tk.X, pady=(0, 6))
-
-        self.rec_title_lbl = ttk.Label(rec_header_frame, text="Выберите канал", font=("Segoe UI", 11, "bold"))
+        right_frame = ttk.Frame(paned, padding=6)
+        paned.add(right_frame, minsize=220)
+        right_frame.columnconfigure(0, weight=1)
+        right_frame.rowconfigure(1, weight=1)
+        toolbar = ttk.Frame(right_frame)
+        toolbar.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        self.rec_title_lbl = ttk.Label(toolbar, text="Выберите канал", font=("Segoe UI", 10, "bold"))
         self.rec_title_lbl.pack(side=tk.LEFT)
+        ttk.Button(toolbar, text="Обновить", style="Compact.TButton", command=self.refresh_records).pack(side=tk.RIGHT)
+        ttk.Button(toolbar, text="Папка", style="Compact.TButton", command=self._open_records_folder).pack(side=tk.RIGHT, padx=4)
 
-        btn_refresh = ttk.Button(rec_header_frame, text="🔄 Обновить", command=self.refresh_records)
-        btn_refresh.pack(side=tk.RIGHT)
-
-        btn_open_folder = ttk.Button(rec_header_frame, text="📁 Папка records", command=self._open_records_folder)
-        btn_open_folder.pack(side=tk.RIGHT, padx=6)
-
-        # Treeview for recordings
+        table = ttk.Frame(right_frame)
+        table.grid(row=1, column=0, sticky="nsew")
+        table.rowconfigure(0, weight=1)
+        table.columnconfigure(0, weight=1)
         columns = ("date", "parts", "duration", "size", "chat", "emotes")
-        self.rec_tree = ttk.Treeview(right_frame, columns=columns, show="headings", selectmode="browse")
-        self.rec_tree.heading("date", text="Дата и время начала")
-        self.rec_tree.heading("parts", text="Части")
-        self.rec_tree.heading("duration", text="Длительность")
-        self.rec_tree.heading("size", text="Размер")
-        self.rec_tree.heading("chat", text="Чат")
-        self.rec_tree.heading("emotes", text="Эмоуты")
+        self.rec_tree = ttk.Treeview(table, columns=columns, show="headings", selectmode="browse", height=6)
+        for name, label, width in [("date", "Дата и время", 155), ("parts", "Части", 48),
+            ("duration", "Время", 85), ("size", "Размер", 78), ("chat", "Чат", 45), ("emotes", "Эмоуты", 60)]:
+            self.rec_tree.heading(name, text=label)
+            self.rec_tree.column(name, width=width, minwidth=45, stretch=name == "date", anchor=tk.W if name == "date" else tk.CENTER)
+        tree_y = ttk.Scrollbar(table, orient=tk.VERTICAL, command=self.rec_tree.yview)
+        tree_x = ttk.Scrollbar(table, orient=tk.HORIZONTAL, command=self.rec_tree.xview)
+        self.rec_tree.configure(yscrollcommand=tree_y.set, xscrollcommand=tree_x.set)
+        self.rec_tree.grid(row=0, column=0, sticky="nsew")
+        tree_y.grid(row=0, column=1, sticky="ns")
+        tree_x.grid(row=1, column=0, sticky="ew")
+        self.rec_tree.bind("<Double-1>", lambda event: self.launch_player())
 
-        self.rec_tree.column("date", width=180)
-        self.rec_tree.column("parts", width=60, anchor=tk.CENTER)
-        self.rec_tree.column("duration", width=100, anchor=tk.CENTER)
-        self.rec_tree.column("size", width=80, anchor=tk.E)
-        self.rec_tree.column("chat", width=60, anchor=tk.CENTER)
-        self.rec_tree.column("emotes", width=60, anchor=tk.CENTER)
-
-        tree_scroll = ttk.Scrollbar(right_frame, orient=tk.VERTICAL, command=self.rec_tree.yview)
-        self.rec_tree.configure(yscrollcommand=tree_scroll.set)
-
-        self.rec_tree.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-        tree_scroll.pack(side=tk.RIGHT, fill=tk.Y)
-        self.rec_tree.bind("<Double-1>", lambda e: self.launch_player())
-
-        # Chat appearance & sizing bar
-        chat_style_bar = ttk.Frame(right_frame, padding=(0, 6, 0, 0))
-        chat_style_bar.pack(fill=tk.X, side=tk.BOTTOM)
-
-        ttk.Label(chat_style_bar, text="Шрифт:").pack(side=tk.LEFT)
-        self.combo_font = ttk.Combobox(
-            chat_style_bar,
-            values=["Segoe UI", "Arial", "Tahoma", "Verdana", "DejaVu Sans", "Consolas"],
-            width=12,
-            state="readonly",
-        )
-        self.combo_font.set(self.config.get("chat_font_family", "Segoe UI"))
-        self.combo_font.pack(side=tk.LEFT, padx=4)
-
-        ttk.Label(chat_style_bar, text="Размер:").pack(side=tk.LEFT, padx=(6, 0))
-        self.combo_font_sz = ttk.Combobox(
-            chat_style_bar,
-            values=["13", "14", "15", "16", "17", "18", "20", "22", "24", "28"],
-            width=4,
-        )
-        self.combo_font_sz.set(str(self.config.get("chat_font_size", 17)))
-        self.combo_font_sz.pack(side=tk.LEFT, padx=4)
-
-        ttk.Label(chat_style_bar, text="ШxВ:").pack(side=tk.LEFT, padx=(6, 0))
-        self.entry_chat_w = ttk.Entry(chat_style_bar, width=5)
-        self.entry_chat_w.insert(0, str(self.config.get("chat_width", 420)))
-        self.entry_chat_w.pack(side=tk.LEFT, padx=2)
-
-        ttk.Label(chat_style_bar, text="x").pack(side=tk.LEFT)
-        self.entry_chat_h = ttk.Entry(chat_style_bar, width=5)
-        self.entry_chat_h.insert(0, str(self.config.get("chat_height", 600)))
-        self.entry_chat_h.pack(side=tk.LEFT, padx=2)
-
-        ttk.Label(chat_style_bar, text="X,Y:").pack(side=tk.LEFT, padx=(6, 0))
-        self.entry_chat_x = ttk.Entry(chat_style_bar, width=5)
-        self.entry_chat_x.insert(0, str(self.config.get("chat_x", 24)))
-        self.entry_chat_x.pack(side=tk.LEFT, padx=2)
-
-        self.entry_chat_y = ttk.Entry(chat_style_bar, width=5)
-        self.entry_chat_y.insert(0, str(self.config.get("chat_y", 60)))
-        self.entry_chat_y.pack(side=tk.LEFT, padx=2)
-
-        ttk.Label(chat_style_bar, text="Фон:").pack(side=tk.LEFT, padx=(6, 0))
-        self.combo_bg_opacity = ttk.Combobox(
-            chat_style_bar,
-            values=["100%", "85%", "75%", "60%", "40%", "20%", "0%"],
-            width=5,
-            state="readonly",
-        )
-        cur_op = self.config.get("chat_bg_opacity", 75)
-        if isinstance(cur_op, float) and cur_op <= 1.0:
-            cur_op = int(round(cur_op * 100))
-        self.combo_bg_opacity.set(f"{cur_op}%" if f"{cur_op}%" in ["100%", "85%", "75%", "60%", "40%", "20%", "0%"] else "75%")
-        self.combo_bg_opacity.pack(side=tk.LEFT, padx=2)
-
-        def set_corner(pos):
-            if pos == "TL":
-                self.entry_chat_x.delete(0, tk.END); self.entry_chat_x.insert(0, "24")
-                self.entry_chat_y.delete(0, tk.END); self.entry_chat_y.insert(0, "60")
-            elif pos == "BL":
-                self.entry_chat_x.delete(0, tk.END); self.entry_chat_x.insert(0, "24")
-                self.entry_chat_y.delete(0, tk.END); self.entry_chat_y.insert(0, "440")
-            elif pos == "TR":
-                self.entry_chat_x.delete(0, tk.END); self.entry_chat_x.insert(0, "1470")
-                self.entry_chat_y.delete(0, tk.END); self.entry_chat_y.insert(0, "60")
-            elif pos == "BR":
-                self.entry_chat_x.delete(0, tk.END); self.entry_chat_x.insert(0, "1470")
-                self.entry_chat_y.delete(0, tk.END); self.entry_chat_y.insert(0, "440")
-
-        ttk.Button(chat_style_bar, text="↖ ВЛ", width=4, command=lambda: set_corner("TL")).pack(side=tk.LEFT, padx=(6, 1))
-        ttk.Button(chat_style_bar, text="↙ НЛ", width=4, command=lambda: set_corner("BL")).pack(side=tk.LEFT, padx=1)
-        ttk.Button(chat_style_bar, text="↗ ВП", width=4, command=lambda: set_corner("TR")).pack(side=tk.LEFT, padx=1)
-        ttk.Button(chat_style_bar, text="↘ НП", width=4, command=lambda: set_corner("BR")).pack(side=tk.LEFT, padx=1)
-
-        # Launch Bar at bottom
-        launch_bar = ttk.Frame(right_frame, padding=(0, 10, 0, 0))
-        launch_bar.pack(fill=tk.X, side=tk.BOTTOM)
-
-        self.var_chat = tk.BooleanVar(value=self.config.get("default_chat_enabled", True))
-        chk_chat = ttk.Checkbutton(launch_bar, text="Включить чат", variable=self.var_chat)
-        chk_chat.pack(side=tk.LEFT, padx=(0, 10))
-
-        self.var_emotes = tk.BooleanVar(value=self.config.get("default_emotes_enabled", True))
-        chk_emotes = ttk.Checkbutton(launch_bar, text="Эмоуты и значки (Режим 2)", variable=self.var_emotes)
-        chk_emotes.pack(side=tk.LEFT, padx=(0, 14))
-
-        ttk.Label(launch_bar, text="Начальный сдвиг (сек):").pack(side=tk.LEFT)
-        self.entry_offset = ttk.Entry(launch_bar, width=6)
-        self.entry_offset.insert(0, str(self.config.get("default_offset_ms", 0) / 1000.0))
-        self.entry_offset.pack(side=tk.LEFT, padx=6)
-
-        ttk.Label(launch_bar, text="Движок:").pack(side=tk.LEFT, padx=(10, 2))
-        self.var_engine = tk.StringVar(value=self.config.get("chat_engine", "Auto"))
-        self.combo_engine_bar = ttk.Combobox(
-            launch_bar,
-            textvariable=self.var_engine,
-            values=["Auto", "Rust", "Lua"],
-            width=6,
-            state="readonly",
-        )
-        self.combo_engine_bar.pack(side=tk.LEFT, padx=2)
-
-        self.var_start_zero = tk.BooleanVar(value=False)
-        chk_start_zero = ttk.Checkbutton(launch_bar, text="С начала (с 00:00)", variable=self.var_start_zero)
-        chk_start_zero.pack(side=tk.LEFT, padx=(8, 2))
-
-        btn_launch = ttk.Button(launch_bar, text="▶ Смотреть в mpv", style="Accent.TButton", command=self.launch_player)
-        btn_launch.pack(side=tk.RIGHT)
-
-        btn_open_session = ttk.Button(launch_bar, text="📂 Открыть сессию", command=self._open_session_folder)
-        btn_open_session.pack(side=tk.RIGHT, padx=8)
+        footer = ttk.Frame(self.tab_records, padding=(0, 6, 0, 0))
+        footer.grid(row=1, column=0, sticky="ew")
+        footer.columnconfigure(0, weight=1)
+        ttk.Label(footer, text="Двойной клик — запуск", style="Dim.TLabel", font=("Segoe UI", 8)).grid(row=0, column=0, sticky="w")
+        self.btn_open_session = ttk.Button(footer, text="Папка сессии", command=self._open_session_folder)
+        self.btn_open_session.grid(row=0, column=1, padx=(6, 8))
+        self.btn_launch = ttk.Button(footer, text="▶ Смотреть в mpv", style="Accent.TButton", command=self.launch_player)
+        self.btn_launch.grid(row=0, column=2)
 
     def _build_import_tab(self):
-        frm = ttk.Frame(self.tab_import, padding=12)
+        frm = ttk.Frame(self.tab_import, padding=8)
         frm.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(frm, text="Импорт чата для существующих видео", foreground="#bf94ff", wraplength=420).pack(anchor=tk.W, pady=(0, 8))
 
-        lbl_desc = tk.Label(
-            frm,
-            text="Импорт чата из архива bestlogs.lurkology.com для существующих видео",
-            font=("Segoe UI", 11, "bold"),
-            bg=self.bg_color,
-            fg="#bf94ff",
-        )
-        lbl_desc.pack(anchor=tk.W, pady=(0, 12))
+        def field(label, browse=None):
+            ttk.Label(frm, text=label).pack(anchor=tk.W, pady=(5, 2))
+            row = ttk.Frame(frm)
+            row.pack(fill=tk.X)
+            if browse:
+                ttk.Button(row, text="Обзор…", command=browse).pack(side=tk.RIGHT, padx=(6, 0))
+            entry = ttk.Entry(row)
+            entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+            return entry
 
-        # Channel input
-        r1 = ttk.Frame(frm)
-        r1.pack(fill=tk.X, pady=4)
-        ttk.Label(r1, text="Канал Twitch:", width=18).pack(side=tk.LEFT)
-        self.imp_channel_entry = ttk.Entry(r1, width=30)
-        self.imp_channel_entry.pack(side=tk.LEFT, padx=6)
-
-        # Video files
-        r2 = ttk.Frame(frm)
-        r2.pack(fill=tk.X, pady=4)
-        ttk.Label(r2, text="Видео файл(ы):", width=18).pack(side=tk.LEFT)
-        self.imp_video_entry = ttk.Entry(r2, width=50)
-        self.imp_video_entry.pack(side=tk.LEFT, padx=6)
-        btn_browse_vid = ttk.Button(r2, text="Обзор...", command=self._browse_import_video)
-        btn_browse_vid.pack(side=tk.LEFT)
-
-        # Video start time & Auto-detection
-        r3 = ttk.Frame(frm)
-        r3.pack(fill=tk.X, pady=4)
-        ttk.Label(r3, text="Старт стрима:", width=18).pack(side=tk.LEFT)
-        self.imp_time_entry = ttk.Entry(r3, width=22)
-        self.imp_time_entry.insert(0, "")
-        self.imp_time_entry.pack(side=tk.LEFT, padx=6)
+        self.imp_channel_entry = field("Канал Twitch")
+        self.imp_video_entry = field("Видео", self._browse_import_video)
+        self.imp_time_entry = field("Старт (UTC): YYYY-MM-DD HH:MM:SS")
         self.var_auto_detect_start = tk.BooleanVar(value=True)
-        self.chk_auto_detect = ttk.Checkbutton(
-            r3,
-            text="⚡ Автоопределение по кучности сообщений (< 1 мин между репликами)",
-            variable=self.var_auto_detect_start,
-        )
-        self.chk_auto_detect.pack(side=tk.LEFT, padx=6)
-
-        # Source mode
-        r4 = ttk.Frame(frm)
-        r4.pack(fill=tk.X, pady=4)
-        ttk.Label(r4, text="Логи bestlogs (.json):", width=18).pack(side=tk.LEFT)
-        self.imp_log_entry = ttk.Entry(r4, width=50)
-        self.imp_log_entry.pack(side=tk.LEFT, padx=6)
-        btn_browse_log = ttk.Button(r4, text="Выбрать файл(ы)...", command=self._browse_import_logs)
-        btn_browse_log.pack(side=tk.LEFT)
-
-        # Download option
-        r5 = ttk.Frame(frm)
-        r5.pack(fill=tk.X, pady=4)
-        ttk.Label(r5, text="Или скачать за дату:", width=18).pack(side=tk.LEFT)
-        self.imp_date_entry = ttk.Entry(r5, width=15)
+        self.chk_auto_detect = ttk.Checkbutton(frm, text="Автоопределение старта по сообщениям", variable=self.var_auto_detect_start)
+        self.chk_auto_detect.pack(anchor=tk.W, pady=4)
+        self.imp_date_entry = field("Даты архива (UTC): YYYY-MM-DD, …")
         self.imp_date_entry.insert(0, datetime.datetime.now().strftime("%Y-%m-%d"))
-        self.imp_date_entry.pack(side=tk.LEFT, padx=6)
-        ttk.Label(r5, text="(например: 2026-10-28 или 2026-10-28,2026-10-29)", foreground=self.text_dim).pack(side=tk.LEFT)
-
-        # Action button
-        btn_run_import = ttk.Button(frm, text="🚀 Создать запись из логов", style="Accent.TButton", command=self._run_import)
-        btn_run_import.pack(anchor=tk.W, pady=16)
-
-        # Status output
-        self.imp_status = tk.Text(frm, height=10, bg=self.card_bg, fg=self.text_color, font=("Consolas", 9))
+        self.btn_import = ttk.Button(frm, text="Создать сессию из архива", style="Accent.TButton", command=self._run_import)
+        self.btn_import.pack(anchor=tk.W, pady=10)
+        self.imp_status = tk.Text(frm, height=5, bg=self.card_bg, fg=self.text_color, font=("Consolas", 9))
         self.imp_status.pack(fill=tk.BOTH, expand=True)
 
     def _build_recorder_tab(self):
-        frm = ttk.Frame(self.tab_record, padding=12)
+        frm = ttk.Frame(self.tab_record, padding=8)
         frm.pack(fill=tk.BOTH, expand=True)
-
-        lbl = tk.Label(frm, text="Запись стрима и чата в реальном времени", font=("Segoe UI", 11, "bold"), bg=self.bg_color, fg="#bf94ff")
-        lbl.pack(anchor=tk.W, pady=(0, 12))
-
-        r1 = ttk.Frame(frm)
-        r1.pack(fill=tk.X, pady=4)
-        ttk.Label(r1, text="Канал Twitch:", width=16).pack(side=tk.LEFT)
-        self.rec_chan_entry = ttk.Entry(r1, width=25)
-        self.rec_chan_entry.pack(side=tk.LEFT, padx=6)
-
-        ttk.Label(r1, text="Качество:").pack(side=tk.LEFT, padx=(12, 4))
-        self.rec_qual_combo = ttk.Combobox(r1, values=["best", "1080p60", "720p60", "480p", "worst"], width=10)
+        ttk.Label(frm, text="Запись стрима и чата", foreground="#bf94ff").pack(anchor=tk.W, pady=(0, 8))
+        ttk.Label(frm, text="Канал Twitch").pack(anchor=tk.W)
+        self.rec_chan_entry = ttk.Entry(frm)
+        self.rec_chan_entry.pack(fill=tk.X, pady=(3, 8))
+        ttk.Label(frm, text="Качество").pack(anchor=tk.W)
+        self.rec_qual_combo = ttk.Combobox(frm, values=["best", "1080p60", "720p60", "480p", "worst"], width=12)
         self.rec_qual_combo.set("best")
-        self.rec_qual_combo.pack(side=tk.LEFT)
-
-        r2 = ttk.Frame(frm)
-        r2.pack(fill=tk.X, pady=8)
-        self.btn_toggle_record = ttk.Button(r2, text="🔴 Начать запись", style="Accent.TButton", command=self._toggle_recording)
-        self.btn_toggle_record.pack(side=tk.LEFT)
-
-        self.rec_status_lbl = ttk.Label(r2, text="Готов к записи", foreground=self.text_dim)
-        self.rec_status_lbl.pack(side=tk.LEFT, padx=12)
-
-        # Recorder log console
-        self.rec_console = tk.Text(frm, height=14, bg=self.card_bg, fg=self.text_color, font=("Consolas", 9))
-        self.rec_console.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
+        self.rec_qual_combo.pack(anchor=tk.W, pady=(3, 8))
+        self.btn_toggle_record = ttk.Button(frm, text="🔴 Начать запись", style="Accent.TButton", command=self._toggle_recording)
+        self.btn_toggle_record.pack(anchor=tk.W)
+        self.rec_status_lbl = ttk.Label(frm, text="Готов к записи", foreground=self.text_dim)
+        self.rec_status_lbl.pack(anchor=tk.W, pady=8)
+        self.rec_console = tk.Text(frm, height=10, bg=self.card_bg, fg=self.text_color, font=("Consolas", 9))
+        self.rec_console.pack(fill=tk.BOTH, expand=True)
 
     def _build_settings_tab(self):
-        frm = ttk.Frame(self.tab_settings, padding=12)
-        frm.pack(fill=tk.BOTH, expand=True)
+        footer = ttk.Frame(self.tab_settings, padding=(8, 6))
+        footer.pack(side=tk.BOTTOM, fill=tk.X)
+        self.btn_save_settings = ttk.Button(footer, text="Сохранить настройки", style="Accent.TButton", command=self._save_settings_from_tab)
+        self.btn_save_settings.pack(side=tk.RIGHT)
+        frm = self._scrollable_frame(self.tab_settings)
 
         lbl = tk.Label(frm, text="Настройки путей и Twitch API", font=("Segoe UI", 11, "bold"), bg=self.bg_color, fg="#bf94ff")
-        lbl.pack(anchor=tk.W, pady=(0, 12))
+        lbl.pack(anchor=tk.W, pady=(0, 8))
 
         def add_field(label_text, cfg_key, width=40):
             row = ttk.Frame(frm)
-            row.pack(fill=tk.X, pady=4)
-            ttk.Label(row, text=label_text, width=22).pack(side=tk.LEFT)
-            entry = ttk.Entry(row, width=width)
+            row.pack(fill=tk.X, pady=3)
+            row.columnconfigure(1, weight=1)
+            ttk.Label(row, text=label_text).grid(row=0, column=0, sticky="w", pady=(0, 2))
+            entry = ttk.Entry(row, width=width, show="•" if cfg_key in {"twitch_app_token", "twitch_client_secret", "twitch_refresh_token"} else "")
             entry.insert(0, str(self.config.get(cfg_key, "")))
-            entry.pack(side=tk.LEFT, padx=6)
+            entry.grid(row=1, column=0, columnspan=2, sticky="ew")
+            row.columnconfigure(0, weight=1)
             return entry
 
         self.cfg_streamlink = add_field("Путь к Streamlink:", "streamlink_path")
@@ -566,26 +446,21 @@ class TwitchRecordsApp:
         self.cfg_python = add_field("Путь к Python:", "python_path")
         self.cfg_client_id = add_field("Twitch Client ID:", "twitch_client_id")
         self.cfg_token = add_field("Twitch App/User Token:", "twitch_app_token")
+        self.cfg_secret = add_field("Twitch Client Secret:", "twitch_client_secret")
+        self.cfg_refresh_token = add_field("Twitch Refresh Token:", "twitch_refresh_token")
+        self.btn_refresh_token = ttk.Button(frm, text="Обновить токен", command=self._refresh_token_manually)
+        self.btn_refresh_token.pack(anchor=tk.W, pady=(6, 2))
+        self.token_status = ttk.Label(frm, text="Токен обновляется при запуске", style="Dim.TLabel", wraplength=400)
+        self.token_status.pack(anchor=tk.W, pady=(0, 8))
         self.cfg_records_dir = add_field("Папка records:", "records_dir")
-
-        lbl_chat = tk.Label(frm, text="Вид и оформление чата по умолчанию", font=("Segoe UI", 11, "bold"), bg=self.bg_color, fg="#bf94ff")
-        lbl_chat.pack(anchor=tk.W, pady=(16, 8))
-
-        self.cfg_chat_font = add_field("Шрифт чата:", "chat_font_family")
-        self.cfg_chat_fs = add_field("Размер шрифта (px):", "chat_font_size")
-        self.cfg_chat_w = add_field("Ширина чата (px):", "chat_width")
-        self.cfg_chat_h = add_field("Высота чата (px):", "chat_height")
-        self.cfg_chat_x = add_field("Позиция X (px):", "chat_x")
-        self.cfg_chat_y = add_field("Позиция Y (px):", "chat_y")
-        self.cfg_chat_bg_opacity = add_field("Прозрачность фона (%):", "chat_bg_opacity")
 
         r_eng = ttk.Frame(frm)
         r_eng.pack(fill=tk.X, pady=4)
-        ttk.Label(r_eng, text="Движок чата по умолчанию:", width=26).pack(side=tk.LEFT)
+        ttk.Label(r_eng, text="Движок чата:").pack(anchor=tk.W)
         self.cfg_engine = ttk.Combobox(
             r_eng,
-            values=["Auto (Rust DLL, иначе Lua)", "Rust (Высокая производительность)", "Lua (Классический совместимый)"],
-            width=36,
+            values=["Auto", "Rust", "Lua"],
+            width=12,
             state="readonly",
         )
         cur_e = str(self.config.get("chat_engine", "Auto")).lower()
@@ -597,56 +472,129 @@ class TwitchRecordsApp:
             self.cfg_engine.current(0)
         self.cfg_engine.pack(side=tk.LEFT, padx=6)
 
-        btn_save = ttk.Button(frm, text="💾 Сохранить настройки", style="Accent.TButton", command=self._save_settings_from_tab)
-        btn_save.pack(anchor=tk.W, pady=16)
 
     def _save_settings_from_tab(self):
-        self.config["streamlink_path"] = self.cfg_streamlink.get().strip()
-        self.config["mpv_path"] = self.cfg_mpv.get().strip()
-        self.config["python_path"] = self.cfg_python.get().strip()
-        self.config["twitch_client_id"] = self.cfg_client_id.get().strip()
-        self.config["twitch_app_token"] = self.cfg_token.get().strip()
-        self.config["records_dir"] = self.cfg_records_dir.get().strip()
-
-        self.config["chat_font_family"] = self.cfg_chat_font.get().strip() or "Segoe UI"
-        try:
-            self.config["chat_font_size"] = int(self.cfg_chat_fs.get().strip())
-        except ValueError:
-            pass
-        try:
-            self.config["chat_width"] = int(self.cfg_chat_w.get().strip())
-        except ValueError:
-            pass
-        try:
-            self.config["chat_height"] = int(self.cfg_chat_h.get().strip())
-        except ValueError:
-            pass
-        try:
-            self.config["chat_x"] = int(self.cfg_chat_x.get().strip())
-        except ValueError:
-            pass
-        try:
-            self.config["chat_y"] = int(self.cfg_chat_y.get().strip())
-        except ValueError:
-            pass
-        try:
-            op_str = self.cfg_chat_bg_opacity.get().strip().replace("%", "")
-            self.config["chat_bg_opacity"] = int(op_str)
-        except ValueError:
-            pass
-
-        idx = self.cfg_engine.current()
-        if idx == 1:
-            self.config["chat_engine"] = "Rust"
-        elif idx == 2:
-            self.config["chat_engine"] = "Lua"
-        else:
-            self.config["chat_engine"] = "Auto"
-        if hasattr(self, "var_engine"):
-            self.var_engine.set(self.config["chat_engine"])
-
-        save_config(self.config)
+        updated = dict(self.config)
+        for key, entry in [("streamlink_path", self.cfg_streamlink), ("mpv_path", self.cfg_mpv),
+            ("python_path", self.cfg_python), ("records_dir", self.cfg_records_dir),
+            ("twitch_client_id", self.cfg_client_id), ("twitch_client_secret", self.cfg_secret),
+            ("twitch_app_token", self.cfg_token), ("twitch_refresh_token", self.cfg_refresh_token)]:
+            updated[key] = entry.get().strip()
+        updated["chat_engine"] = self.cfg_engine.get() or "Auto"
+        if not save_config(updated):
+            messagebox.showerror("Ошибка", "Не удалось сохранить настройки")
+            return
+        self.config = updated
+        self.records_base = SCRIPT_DIR / self.config.get("records_dir", "records")
+        self.records_base.mkdir(parents=True, exist_ok=True)
+        self.refresh_records()
         messagebox.showinfo("Сохранено", "Настройки успешно сохранены в config.json!")
+
+    def _refresh_token_on_startup(self):
+        self._start_token_refresh(manual=False)
+
+    def _refresh_token_manually(self):
+        self._start_token_refresh(manual=True)
+
+    def _start_token_refresh(self, manual=False):
+        if self.token_refresh_busy:
+            return
+        if manual:
+            credentials = (self.cfg_client_id.get().strip(), self.cfg_secret.get().strip(), self.cfg_refresh_token.get().strip())
+        else:
+            credentials = tuple(str(self.config.get(key, "")).strip() for key in ("twitch_client_id", "twitch_client_secret", "twitch_refresh_token"))
+        if not all(credentials):
+            message = "Не заполнены Twitch Client ID, Client Secret или Refresh Token"
+            print("[Twitch OAuth] " + message)
+            self.token_status.configure(text=message)
+            return
+        self.token_refresh_busy = True
+        self.btn_refresh_token.configure(state="disabled")
+        self.btn_save_settings.configure(state="disabled")
+        for entry in (self.cfg_client_id, self.cfg_secret, self.cfg_refresh_token, self.cfg_token):
+            entry.configure(state="disabled")
+        self.token_status.configure(text="Обновление токена…")
+        print("[Twitch OAuth] Обновление токена…")
+
+        def worker():
+            try:
+                result = refresh_twitch_token(*credentials)
+                self.token_results.put((credentials, result, None))
+            except TokenRefreshError as exc:
+                self.token_results.put((credentials, None, str(exc)))
+            except Exception:
+                self.token_results.put((credentials, None, "Неожиданная ошибка обновления Twitch-токена"))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _poll_token_results(self):
+        try:
+            while True:
+                credentials, result, error = self.token_results.get_nowait()
+                self.token_refresh_busy = False
+                self.btn_refresh_token.configure(state="normal")
+                self.btn_save_settings.configure(state="normal")
+                for entry in (self.cfg_client_id, self.cfg_secret, self.cfg_refresh_token, self.cfg_token):
+                    entry.configure(state="normal")
+                current = (self.cfg_client_id.get().strip(), self.cfg_secret.get().strip(), self.cfg_refresh_token.get().strip())
+                if current != credentials:
+                    error = "Реквизиты изменены во время запроса; результат не сохранён"
+                if error is None:
+                    updated = dict(self.config)
+                    updated.update({
+                        "twitch_client_id": credentials[0], "twitch_client_secret": credentials[1],
+                        "twitch_app_token": result["access_token"], "twitch_refresh_token": result["refresh_token"],
+                        "twitch_token_expires_at": int(time.time()) + result["expires_in"],
+                    })
+                    if save_config(updated):
+                        self.config = updated
+                        for entry, key in [(self.cfg_token, "twitch_app_token"), (self.cfg_refresh_token, "twitch_refresh_token")]:
+                            entry.delete(0, tk.END)
+                            entry.insert(0, updated[key])
+                        message = "Access token и refresh token обновлены и сохранены"
+                    else:
+                        message = "Токен получен, но не удалось сохранить config.json"
+                        # Keep the rotated credentials in memory for a retry after disk repair.
+                        self.config = updated
+                        for entry, key in [(self.cfg_token, "twitch_app_token"), (self.cfg_refresh_token, "twitch_refresh_token")]:
+                            entry.delete(0, tk.END)
+                            entry.insert(0, updated[key])
+                else:
+                    message = error
+                print("[Twitch OAuth] " + message)
+                self.token_status.configure(text=message)
+                callbacks, self.waiting_for_token = self.waiting_for_token, []
+                for callback in callbacks:
+                    callback()
+        except queue.Empty:
+            pass
+        self.root.after(100, self._poll_token_results)
+
+    def _cache_directory(self):
+        value = Path(self.config.get("emote_cache_dir", "emote_cache"))
+        return (value if value.is_absolute() else SCRIPT_DIR / value).resolve()
+
+    def _poll_ui_results(self):
+        try:
+            while True:
+                kind, value = self.ui_results.get_nowait()
+                if kind == "import-log":
+                    self.imp_status.insert(tk.END, value + "\n")
+                    self.imp_status.see(tk.END)
+                elif kind == "import-done":
+                    self.import_busy = False
+                    self.btn_import.configure(state="normal")
+                    self.refresh_records()
+        except queue.Empty:
+            pass
+        self.root.after(100, self._poll_ui_results)
+
+    def _after_token_refresh(self, callback):
+        if self.token_refresh_busy:
+            self.waiting_for_token.append(callback)
+            print("[Launcher] Ожидание обновления Twitch-токена…")
+        else:
+            callback()
 
     def refresh_records(self):
         self.channel_listbox.delete(0, tk.END)
@@ -657,22 +605,35 @@ class TwitchRecordsApp:
             return
 
         for p in self.records_base.iterdir():
-            if p.is_dir():
+            if p.is_dir() and not p.is_symlink():
                 ch_name, dt = parse_channel_from_folder(p.name)
-                session_file = None
+                if dt is None or not re.fullmatch(r"[A-Za-z0-9_]{1,25}", ch_name):
+                    continue
+                session_file = p / f"{p.name}.session.json"
+                if not session_file.is_file():
+                    continue
+                try:
+                    with session_file.open(encoding="utf-8") as stream:
+                        manifest = json.load(stream)
+                    if not isinstance(manifest, dict) or str(manifest.get("channel", "")).lower() != ch_name.lower():
+                        continue
+                    if not isinstance(manifest.get("session_start_ms"), int) or isinstance(manifest.get("session_start_ms"), bool):
+                        continue
+                except (OSError, ValueError):
+                    continue
                 chat_file = None
                 emotes_file = None
                 video_parts = []
                 total_bytes = 0
 
-                for item in p.iterdir():
+                for item in sorted(p.iterdir()):
                     if item.is_file():
                         total_bytes += item.stat().st_size
-                        if item.name.endswith(".session.json"):
-                            session_file = item
-                        elif item.name.endswith(".chat.jsonl"):
+                        if item == session_file:
+                            pass
+                        elif item.name.endswith(".chat.jsonl") or item.name == "chat.jsonl":
                             chat_file = item
-                        elif item.name.endswith(".emotes.json"):
+                        elif item.name.endswith(".emotes.json") or item.name == "emotes.json":
                             emotes_file = item
                         elif item.name.endswith(".ts") or item.name.endswith(".mp4") or item.name.endswith(".mkv"):
                             video_parts.append(item)
@@ -686,13 +647,19 @@ class TwitchRecordsApp:
                             sdata = json.load(sf)
                             ch_name = sdata.get("channel", ch_name)
                             s_parts = sdata.get("parts", [])
-                            if s_parts:
-                                parts_count = len(s_parts)
-                                for sp in s_parts:
-                                    s_ms = sp.get("start_ms")
-                                    e_ms = sp.get("end_ms")
-                                    if s_ms and e_ms:
-                                        duration_sec += max(0, (e_ms - s_ms) / 1000.0)
+                        if s_parts:
+                            parts_count = len(s_parts)
+                            referenced_videos = []
+                            for part in s_parts:
+                                if not isinstance(part, dict): continue
+                                file = part.get("file")
+                                if isinstance(file, str) and file:
+                                    path = Path(file)
+                                    referenced_videos.append((path if path.is_absolute() else p / path).resolve())
+                                start, end = part.get("start_ms"), part.get("end_ms")
+                                if isinstance(start, (int, float)) and isinstance(end, (int, float)):
+                                    duration_sec += max(0, (end - start) / 1000.0)
+                            if referenced_videos: video_parts = referenced_videos
                     except Exception:
                         pass
 
@@ -707,7 +674,8 @@ class TwitchRecordsApp:
                     "has_chat": bool(chat_file),
                     "has_emotes": bool(emotes_file),
                     "has_session": bool(session_file),
-                    "video_parts": sorted(video_parts, key=lambda x: x.name),
+                    "video_parts": video_parts,
+                    "session_file": session_file,
                 }
 
                 if ch_name not in self.channels_data:
@@ -775,6 +743,9 @@ class TwitchRecordsApp:
         return None
 
     def launch_player(self, force_script=None):
+        if self.token_refresh_busy:
+            self._after_token_refresh(lambda: self.launch_player(force_script))
+            return
         rec = self._get_selected_recording()
         if not rec:
             messagebox.showwarning("Внимание", "Пожалуйста, выберите запись для воспроизведения!")
@@ -786,81 +757,21 @@ class TwitchRecordsApp:
             video_parts = sorted(list(rec["dir"].glob("*.ts")), key=lambda x: x.name)
 
         if not video_parts:
-            messagebox.showerror("Ошибка", f"В папке {rec['dir'].name} не найдено видеофайлов (.ts)!")
+            messagebox.showerror("Нет видео", "Сессия содержит только чат. Выберите видео при импорте или добавьте части в файл сессии.")
+            return
+        missing = [path for path in video_parts if not path.is_file()]
+        if missing:
+            messagebox.showerror("Видео недоступно", "Не найдены файлы:\n" + "\n".join(str(path) for path in missing))
             return
 
         mpv_bin = self.config.get("mpv_path", "mpv")
-        chat_on = "yes" if self.var_chat.get() else "no"
-        emotes_on = "yes" if self.var_emotes.get() else "no"
-
-        # Calculate IPC socket path
         is_win = platform.system() == "Windows"
         ipc_socket = r"\\.\pipe\mpv_socket" if is_win else "/tmp/mpv_socket"
-
-        # Read initial offset
-        try:
-            offset_sec = float(self.entry_offset.get().strip())
-        except ValueError:
-            offset_sec = 0.0
-
-        # Read chat layout & styling from GUI
-        font_val = self.combo_font.get().strip() or "Segoe UI"
-        try:
-            fs_val = int(self.combo_font_sz.get().strip())
-        except ValueError:
-            fs_val = 17
-        try:
-            w_val = int(self.entry_chat_w.get().strip())
-        except ValueError:
-            w_val = 420
-        try:
-            h_val = int(self.entry_chat_h.get().strip())
-        except ValueError:
-            h_val = 600
-        try:
-            x_val = int(self.entry_chat_x.get().strip())
-        except ValueError:
-            x_val = 24
-        try:
-            y_val = int(self.entry_chat_y.get().strip())
-        except ValueError:
-            y_val = 60
-
-        try:
-            op_str = self.combo_bg_opacity.get().replace("%", "").strip()
-            op_pct = int(op_str)
-        except (ValueError, AttributeError):
-            op_pct = 75
-        op_val = max(0.0, min(1.0, op_pct / 100.0))
-
-        # Update and save to config
-        self.config["chat_font_family"] = font_val
-        self.config["chat_font_size"] = fs_val
-        self.config["chat_width"] = w_val
-        self.config["chat_height"] = h_val
-        self.config["chat_x"] = x_val
-        self.config["chat_y"] = y_val
-        self.config["chat_bg_opacity"] = op_pct
-        if hasattr(self, "var_engine"):
-            self.config["chat_engine"] = self.var_engine.get().strip()
-        save_config(self.config)
-
-        session_dir_posix = rec["dir"].as_posix()
-        script_opts = (
-            f"twitch_session={session_dir_posix},"
-            f"twitch_chat={chat_on},"
-            f"twitch_emotes={emotes_on},"
-            f"twitch_font={font_val},"
-            f"twitch_font_size={fs_val},"
-            f"twitch_width={w_val},"
-            f"twitch_height={h_val},"
-            f"twitch_x={x_val},"
-            f"twitch_y={y_val},"
-            f"twitch_bg_opacity={op_val}"
-        )
+        session_path = rec.get("session_file") or rec["dir"]
+        script_opts = f"twitch_session={session_path.as_posix()}"
 
         # Detect script based on selected mode or fallback
-        engine_mode = self.var_engine.get().strip() if hasattr(self, "var_engine") else self.config.get("chat_engine", "Auto")
+        engine_mode = self.config.get("chat_engine", "Auto")
         chosen_script = LUA_SCRIPT
         is_rust = False
 
@@ -904,9 +815,6 @@ class TwitchRecordsApp:
             "--keep-open=yes",
             f"--log-file={str(mpv_log_path.resolve())}",
         ]
-        if hasattr(self, "var_start_zero") and self.var_start_zero.get():
-            cmd.extend(["--start=0", "--no-resume-playback"])
-
         if is_rust:
             print(f"[Launcher] Using native high-performance Rust plugin: {chosen_script.resolve()}")
             if LUA_INPUT_SCRIPT.exists():
@@ -920,8 +828,7 @@ class TwitchRecordsApp:
             cmd.append(str(vp.resolve()))
 
         # Ensure emotes metadata and used chat images are prepared before starting mpv
-        if self.var_emotes.get():
-            self._ensure_session_emotes(rec["dir"])
+        self._ensure_session_emotes(rec["dir"])
 
         print("Launching mpv command:", cmd)
         try:
@@ -960,31 +867,31 @@ class TwitchRecordsApp:
 
     def _ensure_session_emotes(self, session_dir: Path):
         try:
-            emotes_files = list(session_dir.glob("*.emotes.json"))
-            chat_files = list(session_dir.glob("*.chat.jsonl"))
-            session_files = list(session_dir.glob("*.session.json"))
-
+            def associated(suffix, plain):
+                preferred = session_dir / f"{session_dir.name}{suffix}"
+                if preferred.is_file(): return preferred
+                simple = session_dir / plain
+                if simple.is_file(): return simple
+                return next(iter(sorted(session_dir.glob(f"*{suffix}"))), preferred)
+            session_file = associated(".session.json", "session.json")
+            emotes_file = associated(".emotes.json", "emotes.json")
+            chat_file = associated(".chat.jsonl", "chat.jsonl")
+            data = {}
+            if session_file.is_file():
+                with session_file.open(encoding="utf-8") as file: data = json.load(file)
+            root = data.get("emote_cache_dir")
+            cache_dir = Path(root) if isinstance(root, str) and root else self._cache_directory()
+            if not cache_dir.is_absolute(): cache_dir = session_dir / cache_dir
             from emotes import EmoteManager
-            mgr = EmoteManager(
-                cache_dir=SCRIPT_DIR / "emote_cache",
-                twitch_client_id=self.config.get("twitch_client_id", ""),
-                twitch_token=self.config.get("twitch_app_token", ""),
-            )
-
-            emotes_file = emotes_files[0] if emotes_files else (session_dir / f"{session_dir.name}.emotes.json")
-
-            if not emotes_files and session_files:
-                with open(session_files[0], "r", encoding="utf-8") as sf:
-                    sdata = json.load(sf)
-                ch = sdata.get("channel", "")
-                rid = sdata.get("room_id")
-                if ch:
-                    mgr.snapshot_session(emotes_file, ch, rid, download_all_images=False)
-
-            if chat_files and emotes_file.exists():
-                mgr.cache_used_emotes_from_chat(chat_files[0], emotes_file)
-        except Exception as e:
-            print(f"Error ensuring emotes before mpv launch: {e}")
+            manager = EmoteManager(cache_dir.resolve(), self.config.get("twitch_client_id", ""), self.config.get("twitch_app_token", ""))
+            if data.get("channel"):
+                manager.snapshot_session(emotes_file, data["channel"], data.get("room_id"), capture={"imported_start_ms": data.get("session_start_ms")})
+            if chat_file.is_file() and emotes_file.is_file():
+                report = manager.cache_used_emotes_from_chat(chat_file, emotes_file)
+                if report.get("failed") or report.get("missing_metadata"):
+                    print("[Launcher] Кэш эмоутов подготовлен частично; см. сообщения провайдеров")
+        except Exception as exc:
+            print(f"[Launcher] Не удалось подготовить кэш эмоутов ({type(exc).__name__})")
 
     def _open_records_folder(self):
         path = self.records_base.resolve()
@@ -1015,109 +922,61 @@ class TwitchRecordsApp:
             self.imp_video_entry.delete(0, tk.END)
             self.imp_video_entry.insert(0, ";".join(files))
 
-    def _browse_import_logs(self):
-        files = filedialog.askopenfilenames(
-            title="Выберите файлы логов bestlogs (.json)",
-            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
-        )
-        if files:
-            self.imp_log_entry.delete(0, tk.END)
-            self.imp_log_entry.insert(0, ";".join(files))
-
     def _run_import(self):
-        chan = self.imp_channel_entry.get().strip()
-        time_str = self.imp_time_entry.get().strip()
-        vids_str = self.imp_video_entry.get().strip()
-        logs_str = self.imp_log_entry.get().strip()
-        date_str = self.imp_date_entry.get().strip()
-
-        auto_detect = self.var_auto_detect_start.get()
-
-        if not chan:
-            messagebox.showwarning("Внимание", "Укажите имя канала!")
+        if self.import_busy: return
+        if self.token_refresh_busy:
+            self._after_token_refresh(self._run_import)
             return
-
-        start_dt = None
-        if time_str and not auto_detect:
-            try:
-                start_dt = datetime.datetime.strptime(time_str, "%Y-%m-%d %H:%M:%S")
-            except ValueError:
-                messagebox.showerror("Ошибка", "Неверный формат даты и времени! Используйте ГГГГ-ММ-ДД ЧЧ:ММ:СС или включите автоопределение.")
-                return
-
-        target_date = None
-        if date_str:
-            try:
-                first_d = date_str.split(",")[0].strip()
-                y, m, d = first_d.split("-")
-                target_date = datetime.date(int(y), int(m), int(d))
-            except Exception:
-                pass
-
-        video_paths = [Path(p) for p in vids_str.split(";") if p]
-        log_paths = [Path(p) for p in logs_str.split(";") if p]
-
-        self.imp_status.insert(tk.END, f"Запуск импорта для канала {chan}...\n")
-        self.imp_status.see(tk.END)
+        channel = self.imp_channel_entry.get().strip().lower().lstrip("#")
+        if not re.fullmatch(r"[a-z0-9_]{1,25}", channel):
+            messagebox.showwarning("Канал", "Укажите Twitch login: буквы, цифры и подчёркивание")
+            return
+        try:
+            dates = [datetime.date.fromisoformat(value.strip()) for value in self.imp_date_entry.get().split(",") if value.strip()]
+            if not dates: raise ValueError("Укажите хотя бы одну дату")
+            auto_detect = self.var_auto_detect_start.get()
+            start_text = self.imp_time_entry.get().strip()
+            start = datetime.datetime.strptime(start_text, "%Y-%m-%d %H:%M:%S").replace(tzinfo=datetime.timezone.utc) if start_text and not auto_detect else None
+            if not auto_detect and start is None: raise ValueError("Задайте время старта в UTC")
+            videos = [Path(value.strip()).resolve() for value in self.imp_video_entry.get().split(";") if value.strip()]
+            for video in videos:
+                if not video.is_file(): raise ValueError(f"Видео не найдено: {video.name}")
+        except ValueError as exc:
+            messagebox.showerror("Данные импорта", str(exc))
+            return
+        self.import_busy = True
+        self.btn_import.configure(state="disabled")
+        config = dict(self.config)
+        records_dir = self.records_base
+        cache_dir = self._cache_directory()
+        self.ui_results.put(("import-log", f"Импорт {channel}; даты UTC: {', '.join(map(str, dates))}"))
 
         def worker():
-            from importer import fetch_day_log, import_logs_to_session
-            days_data = []
-
-            if log_paths:
-                for lp in log_paths:
-                    self.imp_status.insert(tk.END, f"Чтение локального файла {lp.name}...\n")
-                    with open(lp, "r", encoding="utf-8") as fp:
-                        days_data.append(json.load(fp))
-            elif date_str:
-                for d_item in date_str.split(","):
-                    try:
-                        y, m, d = d_item.strip().split("-")
-                        self.imp_status.insert(tk.END, f"Запрос логов за {d_item} с bestlogs.lurkology.com...\n")
-                        res = fetch_day_log(chan, y, m, d)
-                        if res:
-                            days_data.append(res)
-                    except Exception as err:
-                        self.imp_status.insert(tk.END, f"Ошибка загрузки: {err}\n")
-
-            if not days_data:
-                self.imp_status.insert(tk.END, "❌ Нет данных логов для импорта.\n")
-                return
-
-            if auto_detect:
-                self.imp_status.insert(tk.END, "🔍 Анализ чата: поиск момента старта стрима по кучности сообщений...\n")
-                self.imp_status.see(tk.END)
-
             try:
-                session_dir = import_logs_to_session(
-                    channel=chan,
-                    days_data=days_data,
-                    video_files=video_paths,
-                    start_dt=start_dt,
-                    target_date=target_date,
-                    auto_detect_start=auto_detect,
-                    records_dir=self.records_base,
-                    emote_cache_dir=SCRIPT_DIR / "emote_cache",
-                    config=self.config,
-                )
-                
-                # Read detected info from session.json
-                sess_file = session_dir / f"{session_dir.name}.session.json"
-                if sess_file.exists():
-                    try:
-                        with open(sess_file, "r", encoding="utf-8") as sf:
-                            sdata = json.load(sf)
-                            det_info = sdata.get("start_detection_info")
-                            if det_info:
-                                self.imp_status.insert(tk.END, f"🎯 {det_info}\n")
-                    except Exception:
-                        pass
-
-                self.imp_status.insert(tk.END, f"✅ Импорт завершен! Создана сессия: {session_dir.name}\n")
-                self.imp_status.see(tk.END)
-                self.root.after(500, self.refresh_records)
-            except Exception as e:
-                self.imp_status.insert(tk.END, f"❌ Ошибка: {e}\n")
+                from importer import fetch_day_log, import_logs_to_session
+                days = []
+                for date in dates:
+                    self.ui_results.put(("import-log", f"Загрузка архива за {date}…"))
+                    days.append(fetch_day_log(channel, str(date.year), str(date.month), str(date.day)))
+                session_dir = import_logs_to_session(channel, days, videos, start_dt=start,
+                    records_dir=records_dir, emote_cache_dir=cache_dir, config=config,
+                    target_date=dates[0], auto_detect_start=auto_detect, timezone="UTC")
+                with (session_dir / f"{session_dir.name}.session.json").open(encoding="utf-8") as file:
+                    metadata = json.load(file)
+                for warning in metadata.get("import_warnings", []):
+                    self.ui_results.put(("import-log", "Предупреждение: " + str(warning)))
+                self.ui_results.put(("import-log", "Создана сессия: " + session_dir.name))
+                if not videos: self.ui_results.put(("import-log", "Сессия содержит только чат; видео не добавлено"))
+            except FileExistsError:
+                self.ui_results.put(("import-log", "Сессия уже существует; файлы не перезаписаны. Для явной замены используйте CLI importer --replace."))
+            except Exception as exc:
+                detail = str(exc)
+                for key in ("twitch_client_secret", "twitch_refresh_token", "twitch_app_token"):
+                    value = str(config.get(key, ""))
+                    if value: detail = detail.replace(value, "[скрыто]")
+                self.ui_results.put(("import-log", f"Ошибка импорта: {detail}"))
+            finally:
+                self.ui_results.put(("import-done", None))
 
         threading.Thread(target=worker, daemon=True).start()
 
