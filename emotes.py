@@ -33,6 +33,9 @@ MAX_IMAGE_PIXELS = 16 * 1024 * 1024
 MAX_IMAGE_DIMENSION = 8192
 MAX_RETRIES = 2
 MAX_RETRY_DELAY = 5.0
+MAX_ANIMATION_FRAMES = 600
+MAX_ANIMATION_PIXELS = 64 * 1024 * 1024
+ANIMATION_KEYS = ("animation_file", "animation_format", "animated")
 CACHE_VERSION = "static-v2"
 PROVIDERS = ("7tv", "bttv", "ffz")  # Highest priority first.
 ASCII_WHITESPACE = " \t\n\r\f"  # Rust split_ascii_whitespace excludes vertical tab.
@@ -173,7 +176,7 @@ def _valid_cached_png(path: Path) -> bool:
         return False
 
 
-def download_image_to_png(url: str, dest_path: Path, target_height: int = 56) -> bool:
+def download_image_to_png(url: str, dest_path: Path, target_height: int = 56, force=False) -> bool:
     """Atomically cache the first frame; retain source pixels, never scale to 28.
 
     target_height remains accepted for call compatibility. It is intentionally
@@ -187,7 +190,7 @@ def download_image_to_png(url: str, dest_path: Path, target_height: int = 56) ->
         except Exception:
             logger.warning("Image URL rejected; only credential-free HTTPS sources are permitted")
             return False
-    if _valid_cached_png(dest_path):
+    if _valid_cached_png(dest_path) and not force:
         return True
     temporary = None
     try:
@@ -210,6 +213,26 @@ def download_image_to_png(url: str, dest_path: Path, target_height: int = 56) ->
         if not _valid_cached_png(temporary):
             raise ValueError("Converted PNG failed validation")
         os.replace(temporary, dest_path)
+        animated_format = None
+        try:
+            animated_format = _animation_info(data)
+            if animated_format:
+                _atomic_bytes(dest_path.with_suffix("." + animated_format), data)
+        except Exception as exc:
+            animated_format = None
+            logger.warning("Animation unavailable; PNG preview kept: %s", _failure_reason(exc))
+        # Never leave an animation from an older source next to a new preview.
+        for extension in ("webp", "gif"):
+            if extension != animated_format:
+                try:
+                    dest_path.with_suffix("." + extension).unlink(missing_ok=True)
+                except OSError:
+                    logger.warning("Stale animation cleanup failed; check cache directory permissions")
+        # Written last: a marker means the PNG and animation for this URL are published.
+        try:
+            _atomic_bytes(dest_path.with_suffix(".animation-check.json"), json.dumps({"url": url, "checked": True}).encode())
+        except OSError:
+            logger.warning("Animation check marker not written; the image will be re-checked later")
         return True
     except Exception as exc:
         logger.warning("Image caching failed: %s", _failure_reason(exc))
@@ -220,6 +243,33 @@ def download_image_to_png(url: str, dest_path: Path, target_height: int = 56) ->
                 temporary.unlink(missing_ok=True)
             except OSError:
                 logger.warning("Temporary image cleanup failed; check cache directory permissions")
+
+
+def _animation_info(data):
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", Image.DecompressionBombWarning)
+        with Image.open(io.BytesIO(data)) as image:
+            if image.format not in {"WEBP", "GIF"}: return None
+            _check_dimensions(image)
+            count = getattr(image, "n_frames", 1)
+            if count <= 1: return None
+            if count > MAX_ANIMATION_FRAMES or image.width * image.height * count > MAX_ANIMATION_PIXELS:
+                raise ValueError("Animation exceeds frame or decoded pixel limits")
+            for index in range(count):
+                image.seek(index)
+                image.load()
+            return image.format.lower()
+
+
+def _atomic_bytes(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as file:
+            file.write(data); file.flush(); os.fsync(file.fileno())
+        os.replace(name, path)
+    finally:
+        Path(name).unlink(missing_ok=True)
 
 
 def _relative_png(value, prefix=None):
@@ -338,7 +388,7 @@ class EmoteManager:
                 files = host["files"]
                 # Prefer 2x source resolution, deterministic regardless of API ordering.
                 candidates = [f["name"] for f in files if isinstance(f, dict) and isinstance(f.get("name"), str)]
-                selected = next((n for n in ("2x.webp", "2x.png", "3x.webp", "4x.webp", "1x.webp", "1x.png")
+                selected = next((n for n in ("2x.webp", "1x.webp", "3x.webp", "4x.webp", "2x.gif", "1x.gif", "2x.png", "1x.png")
                                  if n in candidates), None)
                 if selected is None:
                     raise ValueError("No supported 7TV image")
@@ -388,7 +438,7 @@ class EmoteManager:
                     name = item["name"]
                     if not isinstance(name, str) or not name:
                         raise ValueError("Invalid emote name")
-                    urls = item["urls"]
+                    urls = item.get("animated") or item["urls"]
                     url = urls.get("2") or urls.get("4") or urls.get("1")
                     entries[name] = _emote_meta("ffz", item["id"], url, scope)
             return entries
@@ -451,8 +501,13 @@ class EmoteManager:
             if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", eid):
                 raise ValueError("Unsafe Twitch identifier")
             dest = self._inside_cache(self.twitch_cache / f"{eid}.png")
-            url = f"https://static-cdn.jtvnw.net/emoticons/v2/{eid}/static/dark/2.0"
-            return dest if download_image_to_png(url, dest, target_height=56) else None
+            url = f"https://static-cdn.jtvnw.net/emoticons/v2/{eid}/default/dark/2.0"
+            checked = dest.with_suffix(".animation-check.json")
+            valid_check = False
+            try: valid_check = json.loads(checked.read_text()).get("url") == url
+            except Exception: pass
+            success = download_image_to_png(url, dest, target_height=56, force=not valid_check)
+            return dest if success or _valid_cached_png(dest) else None
         except Exception:
             logger.warning("Twitch image rejected; check the emote ID and cache path")
             return None
@@ -463,7 +518,36 @@ class EmoteManager:
             if provider not in PROVIDERS:
                 raise ValueError("Unknown emote provider")
             dest = self._destination(word_meta, provider)
-            return dest if download_image_to_png(word_meta.get("url"), dest, target_height=56) else None
+            animation_file = None
+            for extension in ("webp", "gif"):
+                candidate = dest.with_suffix("." + extension)
+                if candidate.is_file() and candidate.stat().st_size <= MAX_IMAGE_BYTES:
+                    try:
+                        if _animation_info(candidate.read_bytes()) == extension:
+                            animation_file = candidate
+                            break
+                    except Exception:
+                        pass
+            checked = dest.with_suffix(".animation-check.json")
+            needs_check = not checked.is_file()
+            if checked.is_file():
+                try: needs_check = json.loads(checked.read_text()).get("url") != word_meta.get("animation_url", word_meta.get("url"))
+                except Exception: needs_check = True
+            url = word_meta.get("animation_url") or word_meta.get("url")
+            if animation_file is None and needs_check:
+                success = download_image_to_png(url, dest, target_height=56, force=True)
+            else:
+                success = download_image_to_png(url, dest, target_height=56)
+            if not success: return dest if _valid_cached_png(dest) else None
+            for extension in ("webp", "gif"):
+                candidate = dest.with_suffix("." + extension)
+                if candidate.is_file():
+                    word_meta.update(animation_file=candidate.relative_to(self.cache_dir).as_posix(), animation_format=extension, animated=True)
+                    break
+            else:
+                for key in ANIMATION_KEYS:
+                    word_meta.pop(key, None)
+            return dest
         except Exception:
             logger.warning("Third-party image rejected; check provider metadata and relative cache path")
             return None
@@ -502,6 +586,12 @@ class EmoteManager:
             meta.pop("local_path", None)
             if meta.get("url"):
                 meta["url"] = _remote_url(meta["url"])
+            if meta.get("animation_file"):
+                animation = meta["animation_file"]
+                extension = PurePosixPath(animation).suffix
+                if extension not in {".webp", ".gif"}: raise ValueError("Unsupported animation file")
+                _relative_png(str(PurePosixPath(animation).with_suffix(".png")), prefix)
+                self._inside_cache(self.cache_dir / animation)
             normalized[key] = meta
         return normalized
 
@@ -769,6 +859,18 @@ class EmoteManager:
                         errors += 1
             summary = self._cache_items(twitch_ids, words, badges, snapshot)
             summary["scan_errors"] = errors
+            for word in words:
+                meta = snapshot["words"].get(word)
+                if meta:
+                    for provider_scopes in snapshot.get("provider_snapshots", {}).values():
+                        for entries in provider_scopes.values():
+                            if word in entries and entries[word].get("file") == meta.get("file"):
+                                for key in ANIMATION_KEYS:
+                                    if key in meta:
+                                        entries[word][key] = meta[key]
+                                    else:
+                                        entries[word].pop(key, None)
+            self._write_snapshot(Path(snapshot_file), snapshot)
             if errors:
                 logger.warning("Chat scan skipped %d malformed records/native span tags; cache preparation is incomplete", errors)
             return summary

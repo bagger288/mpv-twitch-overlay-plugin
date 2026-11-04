@@ -5,6 +5,7 @@
 
 #![allow(dead_code)]
 
+pub mod animation;
 pub mod chat;
 pub mod emotes;
 pub mod layout;
@@ -227,6 +228,10 @@ struct PluginState {
     mouse: PanelMouse,
     header_fade: HeaderFade,
     last_header_update: std::time::Instant,
+    chat_scene: Option<renderer::ChatScene>,
+    animation_due: Option<std::time::Instant>,
+    last_animation_render: std::time::Instant,
+    last_cache_check: std::time::Instant,
 }
 
 impl PluginState {
@@ -251,6 +256,10 @@ impl PluginState {
             mouse: PanelMouse::default(),
             header_fade: HeaderFade::default(),
             last_header_update: std::time::Instant::now(),
+            chat_scene: None,
+            animation_due: None,
+            last_animation_render: std::time::Instant::now(),
+            last_cache_check: std::time::Instant::now(),
         }
     }
 
@@ -997,7 +1006,42 @@ impl PluginState {
         }
     }
 
+    fn render_animation_frame(&mut self, force: bool) {
+        if !self.ui.chat_enabled || self.ui.minimized || self.ui.current_view != UiView::Chat || !self.vo_configured || !self.playback_active {
+            self.animation_due = None;
+            return;
+        }
+        let now = std::time::Instant::now();
+        let Some(cache) = self.emotes.as_ref() else { return; };
+        let Some(scene) = self.chat_scene.as_mut() else { return; };
+        let frame = self.renderer.render_scene(scene, cache, cache.elapsed(), force);
+        if let Some(data) = frame.pixels {
+            let ret = self.mpv.overlay_add_bgra(OVERLAY_ID, self.ui.panel_x, self.ui.panel_y, &data, self.ui.panel_width, self.ui.panel_height, self.ui.panel_width * 4);
+            if ret >= 0 { self.overlay_active = true; }
+            self.last_animation_render = now;
+        }
+        self.animation_due = frame.next_frame.map(|delay| {
+            (now + delay).max(self.last_animation_render + std::time::Duration::from_nanos(16_666_667))
+        });
+    }
+
+    fn update_animations(&mut self) {
+        let now = std::time::Instant::now();
+        if self.last_cache_check.elapsed() >= std::time::Duration::from_secs(1) {
+            self.last_cache_check = now;
+            if self.emotes.as_ref().map(|cache| cache.invalidate_changed()).unwrap_or(false) {
+                self.update_frame();
+                return;
+            }
+        }
+        if self.animation_due.map(|due| due <= now).unwrap_or(false) {
+            self.render_animation_frame(false);
+        }
+    }
+
     fn update_frame(&mut self) {
+        self.chat_scene = None;
+        self.animation_due = None;
         if !self.ui.chat_enabled {
             if self.overlay_active {
                 self.mpv.overlay_remove(OVERLAY_ID);
@@ -1052,6 +1096,11 @@ impl PluginState {
             .as_ref()
             .map(|s| s.session_data.channel.as_str())
             .unwrap_or("");
+        if self.ui.current_view == UiView::Chat {
+            self.chat_scene = self.renderer.prepare_chat_scene(&layout_messages, emotes, &self.ui, channel);
+            self.render_animation_frame(true);
+            return;
+        }
         let bgra_data =
             match self
                 .renderer
@@ -1128,8 +1177,12 @@ pub unsafe extern "C" fn mpv_open_cplugin(ctx: MpvHandleRaw) -> c_int {
         state.update_mouse_hover();
         state.update_header_animation();
         state.update_search_keys_state();
+        state.update_animations();
 
-        let wait_timeout = if state.mouse.is_dragging() { 0.01 } else if state.header_fade.is_animating() { 0.016 } else { 0.04 };
+        let mut wait_timeout: f64 = if state.mouse.is_dragging() { 0.01 } else if state.header_fade.is_animating() { 0.016 } else { 0.04 };
+        if let Some(due) = state.animation_due {
+            wait_timeout = wait_timeout.min(due.saturating_duration_since(std::time::Instant::now()).as_secs_f64());
+        }
         let event_ptr = state.mpv.wait_event(wait_timeout);
         if event_ptr.is_null() {
             // Even on timeout, if in Search view, refresh overlay for cursor blink animation

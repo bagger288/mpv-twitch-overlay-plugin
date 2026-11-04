@@ -22,7 +22,7 @@ tiny-skia = "0.11"
 fontdue = "0.9"
 
 # Image decoding for emotes and badges (PNG, WebP, JPEG)
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
 
 # Utilities
 parking_lot = "0.12"

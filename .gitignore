@@ -3,6 +3,7 @@
 /target/
 /tools/
 /build/
+/tg_bot/
 
 # Python caches and local environments
 __pycache__/

@@ -33,13 +33,7 @@ RUST_DLL_TARGET = SCRIPT_DIR / "build" / "twitch_chat.dll"
 
 
 def load_config() -> dict:
-    if CONFIG_FILE.exists():
-        try:
-            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {
+    defaults = {
         "streamlink_path": "streamlink",
         "mpv_path": "mpv",
         "python_path": "python",
@@ -48,7 +42,19 @@ def load_config() -> dict:
         "default_offset_ms": 0,
         "records_dir": "records",
         "emote_cache_dir": "emote_cache",
+        "server_url": "",
+        "twitch_proxy_playlist": "",
     }
+    if CONFIG_FILE.exists():
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    defaults.update(data)
+                    return defaults
+        except Exception:
+            pass
+    return defaults
 
 
 def save_config(cfg: dict):
@@ -120,6 +126,7 @@ class TwitchRecordsApp:
         self.ui_results = queue.Queue()
         self.import_busy = False
         self.waiting_for_token = []
+        self.pc_agent_proc: Optional[subprocess.Popen] = None
         self.root.after(100, self._poll_ui_results)
 
         self._apply_theme()
@@ -308,7 +315,11 @@ class TwitchRecordsApp:
         self.tab_record = ttk.Frame(self.notebook, padding=10)
         self.notebook.add(self.tab_record, text="Запись")
 
-        # Tab 4: Settings
+        # Tab 4: PC Agent
+        self.tab_agent = ttk.Frame(self.notebook, padding=10)
+        self.notebook.add(self.tab_agent, text="PC Agent")
+
+        # Tab 5: Settings
         self.tab_settings = ttk.Frame(self.notebook, padding=10)
         self.notebook.add(self.tab_settings, text="Настройки")
 
@@ -316,6 +327,7 @@ class TwitchRecordsApp:
         self._build_import_tab()
         self._build_recorder_tab()
         self._build_settings_tab()
+        self._build_pc_agent_tab()
 
     def _build_records_tab(self):
         self.tab_records.rowconfigure(0, weight=1)
@@ -420,6 +432,35 @@ class TwitchRecordsApp:
         self.rec_console = tk.Text(frm, height=10, bg=self.card_bg, fg=self.text_color, font=("Consolas", 9))
         self.rec_console.pack(fill=tk.BOTH, expand=True)
 
+    def _build_pc_agent_tab(self):
+        frm = ttk.Frame(self.tab_agent, padding=8)
+        frm.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(frm, text="Автоматическая запись (PC Agent)", foreground="#bf94ff").pack(anchor=tk.W, pady=(0, 4))
+        ttk.Label(frm, text="Подключается к серверу мониторинга и автоматически записывает стримы",
+                  style="Dim.TLabel", wraplength=450).pack(anchor=tk.W, pady=(0, 8))
+
+        ctrl = ttk.Frame(frm)
+        ctrl.pack(fill=tk.X, pady=(0, 8))
+        self.btn_toggle_agent = ttk.Button(ctrl, text="▶ Старт", style="Accent.TButton",
+                                           command=self._toggle_pc_agent)
+        self.btn_toggle_agent.pack(side=tk.LEFT)
+        ttk.Button(ctrl, text="Очистить", style="Compact.TButton",
+                   command=lambda: self.agent_console.delete("1.0", tk.END)).pack(side=tk.RIGHT)
+
+        self.agent_status_lbl = ttk.Label(frm, text="Листенер остановлен", foreground=self.text_dim)
+        self.agent_status_lbl.pack(anchor=tk.W, pady=(0, 6))
+
+        console_frame = ttk.Frame(frm)
+        console_frame.pack(fill=tk.BOTH, expand=True)
+        console_frame.rowconfigure(0, weight=1)
+        console_frame.columnconfigure(0, weight=1)
+        scrollbar = ttk.Scrollbar(console_frame, orient=tk.VERTICAL)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        self.agent_console = tk.Text(console_frame, height=12, bg=self.card_bg, fg=self.text_color,
+                                     font=("Consolas", 9), wrap=tk.WORD, yscrollcommand=scrollbar.set)
+        self.agent_console.grid(row=0, column=0, sticky="nsew")
+        scrollbar.config(command=self.agent_console.yview)
+
     def _build_settings_tab(self):
         footer = ttk.Frame(self.tab_settings, padding=(8, 6))
         footer.pack(side=tk.BOTTOM, fill=tk.X)
@@ -454,6 +495,9 @@ class TwitchRecordsApp:
         self.token_status.pack(anchor=tk.W, pady=(0, 8))
         self.cfg_records_dir = add_field("Папка records:", "records_dir")
 
+        self.cfg_server_url = add_field("SERVER_URL (сервер мониторинга):", "server_url")
+        self.cfg_proxy_playlist = add_field("Twitch Proxy Playlist (--twitch-proxy-playlist):", "twitch_proxy_playlist")
+
         r_eng = ttk.Frame(frm)
         r_eng.pack(fill=tk.X, pady=4)
         ttk.Label(r_eng, text="Движок чата:").pack(anchor=tk.W)
@@ -478,7 +522,8 @@ class TwitchRecordsApp:
         for key, entry in [("streamlink_path", self.cfg_streamlink), ("mpv_path", self.cfg_mpv),
             ("python_path", self.cfg_python), ("records_dir", self.cfg_records_dir),
             ("twitch_client_id", self.cfg_client_id), ("twitch_client_secret", self.cfg_secret),
-            ("twitch_app_token", self.cfg_token), ("twitch_refresh_token", self.cfg_refresh_token)]:
+            ("twitch_app_token", self.cfg_token), ("twitch_refresh_token", self.cfg_refresh_token),
+            ("server_url", self.cfg_server_url), ("twitch_proxy_playlist", self.cfg_proxy_playlist)]:
             updated[key] = entry.get().strip()
         updated["chat_engine"] = self.cfg_engine.get() or "Auto"
         if not save_config(updated):
@@ -585,6 +630,18 @@ class TwitchRecordsApp:
                     self.import_busy = False
                     self.btn_import.configure(state="normal")
                     self.refresh_records()
+                elif kind == "rec-log":
+                    self.rec_console.insert(tk.END, value)
+                    self.rec_console.see(tk.END)
+                elif kind == "rec-done":
+                    self.refresh_records()
+                elif kind == "agent-log":
+                    self.agent_console.insert(tk.END, value)
+                    self.agent_console.see(tk.END)
+                elif kind == "agent-stopped":
+                    self.btn_toggle_agent.config(text="▶ Старт")
+                    self.agent_status_lbl.config(text="Листенер остановлен", foreground=self.text_dim)
+                    self.pc_agent_proc = None
         except queue.Empty:
             pass
         self.root.after(100, self._poll_ui_results)
@@ -1037,11 +1094,18 @@ class TwitchRecordsApp:
             self.rec_console.delete("1.0", tk.END)
             self.rec_console.insert(tk.END, f"Запуск: {' '.join(cmd)}\n")
 
+            env = os.environ.copy()
+            env["PYTHONUNBUFFERED"] = "1"
+            env["PYTHONIOENCODING"] = "utf-8"
+
             popen_kwargs = {
                 "stdout": subprocess.PIPE,
                 "stderr": subprocess.STDOUT,
                 "universal_newlines": True,
+                "encoding": "utf-8",
+                "errors": "replace",
                 "bufsize": 1,
+                "env": env,
             }
             if platform.system() == "Windows":
                 popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
@@ -1054,16 +1118,131 @@ class TwitchRecordsApp:
                 while self.active_recording_proc and self.active_recording_proc.poll() is None:
                     line = self.active_recording_proc.stdout.readline()
                     if line:
-                        self.rec_console.insert(tk.END, line)
-                        self.rec_console.see(tk.END)
-                self.root.after(500, self.refresh_records)
+                        self.ui_results.put(("rec-log", line))
+                self.ui_results.put(("rec-done", None))
 
             threading.Thread(target=reader, daemon=True).start()
 
+    def _toggle_pc_agent(self):
+        if self.pc_agent_proc and self.pc_agent_proc.poll() is None:
+            self._stop_pc_agent()
+        else:
+            self._start_pc_agent()
+
+    def _start_pc_agent(self):
+        # Resolve python binary: prefer miniconda if it exists and has socketio
+        python_bin = self.config.get("python_path", "python")
+        miniconda_python = r"C:\Users\User\miniconda3\python.exe"
+        if (python_bin == "python" or not python_bin) and os.path.isfile(miniconda_python):
+            python_bin = miniconda_python
+
+        agent_script = SCRIPT_DIR / "PC_AGENT.py"
+        if not agent_script.is_file():
+            messagebox.showerror("Ошибка", f"Скрипт не найден:\n{agent_script}")
+            return
+
+        env = os.environ.copy()
+        env["PYTHONUNBUFFERED"] = "1"
+        env["PYTHONIOENCODING"] = "utf-8"
+        env["SERVER_URL"] = self.config.get("server_url", "")
+        env["TWITCH_PROXY_PLAYLIST"] = self.config.get("twitch_proxy_playlist", "")
+        env["RECORDS_DIR"] = str(SCRIPT_DIR / self.config.get("records_dir", "records"))
+        env["STREAMLINK_PATH"] = self.config.get("streamlink_path", "streamlink")
+
+        cmd = [python_bin, str(agent_script)]
+        self.agent_console.delete("1.0", tk.END)
+        self.agent_console.insert(tk.END, f"Запуск: {' '.join(cmd)}\n")
+
+        popen_kwargs = {
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.STDOUT,
+            "universal_newlines": True,
+            "encoding": "utf-8",
+            "errors": "replace",
+            "bufsize": 1,
+            "env": env,
+        }
+        if platform.system() == "Windows":
+            popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+
+        try:
+            self.pc_agent_proc = subprocess.Popen(cmd, **popen_kwargs)
+        except FileNotFoundError:
+            messagebox.showerror("Ошибка", f"Python не найден по пути: '{python_bin}'.\nУкажите корректный путь во вкладке 'Настройки'.")
+            return
+        except Exception as e:
+            messagebox.showerror("Ошибка запуска", str(e))
+            return
+
+        self.btn_toggle_agent.config(text="⏹ Стоп")
+        self.agent_status_lbl.config(text="🟢 Листенер активен", foreground="#00c853")
+
+        def reader():
+            proc = self.pc_agent_proc
+            while proc and proc.poll() is None:
+                line = proc.stdout.readline()
+                if line:
+                    self.ui_results.put(("agent-log", line))
+            # Process ended
+            self.ui_results.put(("agent-stopped", None))
+
+        threading.Thread(target=reader, daemon=True).start()
+
+    def _stop_pc_agent(self):
+        if not self.pc_agent_proc or self.pc_agent_proc.poll() is not None:
+            self.pc_agent_proc = None
+            self.btn_toggle_agent.config(text="▶ Старт")
+            self.agent_status_lbl.config(text="Листенер остановлен", foreground=self.text_dim)
+            return
+
+        pid = self.pc_agent_proc.pid
+        self.agent_status_lbl.config(text="Остановка листенера...")
+        self.agent_console.insert(tk.END, f"\n[Launcher] Остановка PC Agent (PID {pid})...\n")
+        self.agent_console.see(tk.END)
+
+        if platform.system() == "Windows":
+            try:
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True)
+            except Exception as e:
+                print(f"taskkill error: {e}")
+        else:
+            try:
+                import signal
+                os.killpg(os.getpgid(pid), signal.SIGTERM)
+            except Exception:
+                try:
+                    self.pc_agent_proc.terminate()
+                    self.pc_agent_proc.wait(timeout=2)
+                except Exception:
+                    self.pc_agent_proc.kill()
+
+        try:
+            self.pc_agent_proc.wait(timeout=3)
+        except Exception:
+            pass
+
+        self.pc_agent_proc = None
+        self.btn_toggle_agent.config(text="▶ Старт")
+        self.agent_status_lbl.config(text="Листенер остановлен", foreground=self.text_dim)
+        self.agent_console.insert(tk.END, "[Launcher] PC Agent остановлен.\n")
+        self.agent_console.see(tk.END)
+
     def _on_close(self):
-        if self.active_recording_proc and self.active_recording_proc.poll() is None:
-            if messagebox.askyesno("Выход", "Идет запись стрима! Остановить запись и выйти?"):
-                self._stop_active_recording()
+        recording_active = self.active_recording_proc and self.active_recording_proc.poll() is None
+        agent_active = self.pc_agent_proc and self.pc_agent_proc.poll() is None
+
+        if recording_active or agent_active:
+            parts = []
+            if recording_active:
+                parts.append("запись стрима")
+            if agent_active:
+                parts.append("PC Agent листенер")
+            msg = f"Активны: {', '.join(parts)}. Остановить и выйти?"
+            if messagebox.askyesno("Выход", msg):
+                if recording_active:
+                    self._stop_active_recording()
+                if agent_active:
+                    self._stop_pc_agent()
                 self.root.destroy()
         else:
             self.root.destroy()

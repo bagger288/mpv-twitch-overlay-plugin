@@ -10,6 +10,30 @@ use tiny_skia::{Mask, Paint, Pixmap, Rect, Transform};
 const HEADER_BACKGROUND: [u8; 4] = [22, 23, 29, 245];
 const HEADER_BORDER: [u8; 4] = [45, 45, 58, 255];
 
+use std::sync::Arc;
+use std::time::Duration;
+
+pub struct AnimatedImage {
+    pub path: String,
+    pub height: u32,
+    pub x: i32,
+    pub y: i32,
+}
+
+pub struct ChatScene {
+    pub base: Pixmap,
+    pub images: Vec<AnimatedImage>,
+    pub clip: (f32, f32),
+    pub mask: Mask,
+    pub last_frames: Vec<Option<(usize, bool)>>,
+    pub cache_revision: u64,
+}
+
+pub struct SceneFrame {
+    pub pixels: Option<Vec<u8>>,
+    pub next_frame: Option<Duration>,
+}
+
 pub struct ChatRenderer {
     layouter: ChatLayouter,
 }
@@ -68,6 +92,69 @@ impl ChatRenderer {
         }
 
         Some(Self::to_bgra(&pixmap))
+    }
+
+    pub fn prepare_chat_scene(&self, messages: &[LayoutMessage], cache: &EmoteCache, ui: &UiState, channel: &str) -> Option<ChatScene> {
+        let viewport = ChatViewport::new(ui, messages.last().map(|message| message.bottom_y).unwrap_or(0.0));
+        let mut images = Vec::new();
+        let mut static_messages = messages.to_vec();
+        for message in &mut static_messages {
+            message.tokens.retain(|token| {
+                if let LayoutToken::Image { path, x, y, height, .. } = token {
+                    if matches!(std::path::Path::new(path).extension().and_then(|s| s.to_str()), Some("webp" | "gif")) {
+                        let top = viewport.base_y + y;
+                        if top + *height as f32 >= viewport.top && top < viewport.bottom {
+                            cache.request(path, *height);
+                            images.push(AnimatedImage { path: path.clone(), height: *height, x: *x as i32, y: top as i32 });
+                        }
+                        return false;
+                    }
+                }
+                true
+            });
+        }
+        let mut rgba = self.render_frame(&static_messages, cache, ui, channel)?;
+        for pixel in rgba.chunks_exact_mut(4) { pixel.swap(0, 2); }
+        let base = Pixmap::from_vec(rgba, tiny_skia::IntSize::from_wh(ui.panel_width, ui.panel_height)?)?;
+        let mut mask = Mask::new(ui.panel_width, ui.panel_height)?;
+        let top = (viewport.top.ceil() as usize).min(ui.panel_height as usize);
+        let bottom = (viewport.bottom.ceil() as usize).min(ui.panel_height as usize);
+        mask.data_mut()[top * ui.panel_width as usize..bottom * ui.panel_width as usize].fill(255);
+        let last_frames = vec![None; images.len()];
+        Some(ChatScene { base, images, clip: (viewport.top, viewport.bottom), mask, last_frames, cache_revision: cache.revision() })
+    }
+
+    pub fn render_scene(&mut self, scene: &mut ChatScene, cache: &EmoteCache, elapsed: Duration, force: bool) -> SceneFrame {
+        cache.poll();
+        let mut frames: Vec<Option<Arc<Pixmap>>> = Vec::with_capacity(scene.images.len());
+        let mut next_frame = None;
+        let mut changed = force;
+        let revision = cache.revision();
+        if scene.cache_revision != revision {
+            changed = true;
+            scene.cache_revision = revision;
+        }
+        for (index, image) in scene.images.iter().enumerate() {
+            let sample = cache.sample(&image.path, image.height, elapsed);
+            let state = sample.as_ref().map(|sample| (sample.frame, sample.animated));
+            changed |= scene.last_frames[index] != state;
+            scene.last_frames[index] = state;
+            if let Some(sample) = &sample {
+                if let Some(delay) = sample.next_frame { next_frame = Some(next_frame.map(|next: Duration| next.min(delay)).unwrap_or(delay)); }
+            }
+            frames.push(sample.map(|sample| sample.pixmap));
+        }
+        if cache.pending_count() > 0 { next_frame = Some(next_frame.unwrap_or(Duration::from_millis(10)).min(Duration::from_millis(10))); }
+        let pixels = if changed {
+            let mut pixmap = scene.base.clone();
+            for (image, frame) in scene.images.iter().zip(frames) {
+                if let Some(frame) = frame {
+                    pixmap.draw_pixmap(image.x, image.y, frame.as_ref().as_ref(), &tiny_skia::PixmapPaint::default(), Transform::identity(), Some(&scene.mask));
+                }
+            }
+            Some(Self::to_bgra(&pixmap))
+        } else { None };
+        SceneFrame { pixels, next_frame }
     }
 
     fn to_bgra(pixmap: &Pixmap) -> Vec<u8> {
@@ -300,7 +387,7 @@ impl ChatRenderer {
                                 pixmap.draw_pixmap(
                                     *x as i32,
                                     render_y as i32,
-                                    emote_px.as_ref(),
+                                    emote_px.as_ref().as_ref(),
                                     &tiny_skia::PixmapPaint::default(),
                                     Transform::identity(),
                                     Some(&mask),
@@ -946,6 +1033,49 @@ mod tests {
         }
         std::fs::remove_file(image_path).unwrap();
         std::fs::remove_dir(dir).unwrap();
+    }
+
+    #[test]
+    fn animated_scene_emits_pixels_only_when_frame_changes() {
+        let mut renderer = ChatRenderer::new();
+        let dir = std::env::temp_dir().join(format!("mpv-scene-anim-{}", std::process::id()));
+        let gif = dir.join("anim.gif");
+        crate::animation::write_test_gif(&gif, &[40, 60], image::codecs::gif::Repeat::Infinite);
+        let cache = EmoteCache::new(&dir);
+        let ui = UiState { panel_width: 420, panel_height: 160, ..UiState::default() };
+        let viewport = ChatViewport::new(&ui, 300.0);
+        let path = gif.to_string_lossy().into_owned();
+        let messages = [LayoutMessage { msg_index: 0, timestamp_ms: 0, top_y: 0.0, bottom_y: 300.0, tokens: vec![
+            LayoutToken::Image { path: path.clone(), x: 150.0, y: 80.0 - viewport.base_y, width: 48, height: 24 },
+            // Fully outside the viewport: must not be scheduled at all.
+            LayoutToken::Image { path: path.clone(), x: 150.0, y: -200.0 - viewport.base_y, width: 48, height: 24 },
+        ] }];
+        let mut scene = renderer.prepare_chat_scene(&messages, &cache, &ui, "test").unwrap();
+        assert_eq!(scene.images.len(), 1);
+        let pixel = ((82 * 420 + 152) * 4) as usize;
+        // The static base never contains animated tokens.
+        assert_ne!(&scene.base.data()[pixel..pixel + 4], &[255, 0, 0, 255]);
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !cache.sample(&path, 24, Duration::ZERO).map(|sample| sample.animated).unwrap_or(false) {
+            assert!(std::time::Instant::now() < deadline, "animation was not decoded in time");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let first = renderer.render_scene(&mut scene, &cache, Duration::ZERO, true);
+        let first_pixels = first.pixels.expect("forced render");
+        assert_eq!(&first_pixels[pixel..pixel + 4], &[0, 0, 255, 255], "red frame in BGRA");
+        assert_eq!(first.next_frame, Some(Duration::from_millis(40)));
+
+        let idle = renderer.render_scene(&mut scene, &cache, Duration::from_millis(10), false);
+        assert!(idle.pixels.is_none(), "unchanged frame must not trigger overlay-add");
+        assert_eq!(idle.next_frame, Some(Duration::from_millis(30)));
+
+        let next = renderer.render_scene(&mut scene, &cache, Duration::from_millis(50), false);
+        let next_pixels = next.pixels.expect("frame change");
+        assert_eq!(&next_pixels[pixel..pixel + 4], &[0, 255, 0, 255], "green frame in BGRA");
+        let outside = ((140 * 420 + 20) * 4) as usize;
+        assert_eq!(&next_pixels[outside..outside + 4], &first_pixels[outside..outside + 4]);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }
 
