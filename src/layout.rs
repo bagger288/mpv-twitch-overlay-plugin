@@ -197,6 +197,7 @@ impl ChatLayouter {
                         fallback_text,
                         native,
                     } => {
+                        let path = emotes.preferred_path(&path, manifest.animation_path(&path));
                         if emotes.resolve_path(&path).is_some() {
                             line.image(emotes, path, EMOTE_SIZE, native, false);
                         } else {

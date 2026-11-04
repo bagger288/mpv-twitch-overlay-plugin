@@ -69,6 +69,8 @@ pub struct WordEmoteEntry {
     pub file: Option<String>,
     #[serde(default)]
     pub local_path: Option<String>,
+    #[serde(default)]
+    pub animation_file: Option<String>,
 }
 
 impl WordEmoteEntry {
@@ -102,6 +104,8 @@ pub struct EmotesManifest {
     #[serde(default)]
     pub words: HashMap<String, WordEmoteEntry>,
     #[serde(default)]
+    pub twitch_emotes: HashMap<String, WordEmoteEntry>,
+    #[serde(default)]
     pub channel_emotes: HashMap<String, WordEmoteEntry>,
     #[serde(default)]
     pub global_emotes: HashMap<String, WordEmoteEntry>,
@@ -129,6 +133,11 @@ impl EmotesManifest {
             }
         }
         None
+    }
+
+    pub fn animation_path(&self, preview: &str) -> Option<&str> {
+        self.words.values().chain(self.channel_emotes.values()).chain(self.global_emotes.values()).chain(self.twitch_emotes.values())
+            .find(|entry| entry.get_path() == Some(preview)).and_then(|entry| entry.animation_file.as_deref())
     }
 
     pub fn get_badge_path(&self, set_id: &str, version: &str) -> String {
