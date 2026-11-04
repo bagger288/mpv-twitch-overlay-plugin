@@ -1,4 +1,7 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod config;
+mod emotes;
 mod importer;
 mod player;
 mod process_manager;
@@ -206,6 +209,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let root = root_dir.clone();
         let cfg_arc = config_arc.clone();
         let sessions_arc = sessions_cache.clone();
+        let refresh_fn = refresh_ui_records.clone();
 
         main_window.on_launch_mpv(move || {
             if let Some(ui) = handle_weak.upgrade() {
@@ -221,10 +225,49 @@ fn main() -> Result<(), slint::PlatformError> {
                     };
 
                     if let Some(s) = target_session {
+                        let s_clone = s.clone();
                         let cfg = cfg_arc.lock().unwrap().clone();
-                        if let Err(e) = player::launch_player(&root, &cfg, s) {
-                            eprintln!("[Launcher Error] {}", e);
-                        }
+                        let root_clone = root.clone();
+                        let cache_root = root_clone.join(&cfg.emote_cache_dir);
+                        let h = handle_weak.clone();
+                        let rf = refresh_fn.clone();
+
+                        std::thread::spawn(move || {
+                            let rt = tokio::runtime::Builder::new_current_thread()
+                                .enable_all()
+                                .build()
+                                .unwrap();
+
+                            let h_for_log = h.clone();
+                            let log_cb = move |msg: String| {
+                                let h_inner = h_for_log.clone();
+                                let _ = slint::invoke_from_event_loop(move || {
+                                    if let Some(ui) = h_inner.upgrade() {
+                                        let mut text = ui.get_imp_console_text().to_string();
+                                        text.push_str(&msg);
+                                        text.push('\n');
+                                        ui.set_imp_console_text(text.into());
+                                    }
+                                });
+                            };
+
+                            log_cb(format!("[Player] Подготовка эмоутов для сессии {}...", s_clone.dir.display()));
+                            let _ = rt.block_on(emotes::ensure_session_emotes(
+                                &s_clone.dir,
+                                &s_clone.channel,
+                                None,
+                                &cache_root,
+                                log_cb,
+                            ));
+
+                            let _ = slint::invoke_from_event_loop(move || {
+                                rf();
+                            });
+
+                            if let Err(e) = player::launch_player(&root_clone, &cfg, &s_clone) {
+                                eprintln!("[Launcher Error] {}", e);
+                            }
+                        });
                     }
                 }
             }
@@ -570,6 +613,9 @@ fn main() -> Result<(), slint::PlatformError> {
 
             let h = handle_weak.clone();
             let rf = refresh_fn.clone();
+            let root_thread = root.clone();
+            let cfg_arc_thread = cfg_arc.clone();
+            let ch_for_thread = ch.clone();
 
             std::thread::spawn(move || {
                 let rt = tokio::runtime::Builder::new_current_thread()
@@ -591,7 +637,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 };
 
                 let params = importer::ImportParams {
-                    channel: ch,
+                    channel: ch_for_thread.clone(),
                     dates: parsed_dates,
                     video_paths,
                     start_dt: None,
@@ -599,16 +645,58 @@ fn main() -> Result<(), slint::PlatformError> {
                     records_dir,
                 };
 
-                let res = rt.block_on(importer::run_import_task(params, log_cb));
+                let cache_root = {
+                    let cfg = cfg_arc_thread.lock().unwrap();
+                    root_thread.join(&cfg.emote_cache_dir)
+                };
+
+                let res = rt.block_on(importer::run_import_task(params, log_cb.clone()));
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(ui) = h.upgrade() {
                         ui.set_imp_busy(false);
                         match res {
-                            Ok(path) => {
+                            Ok(session_path) => {
                                 let mut cur = ui.get_imp_console_text().to_string();
-                                cur.push_str(&format!("Готово! Создана сессия: {}\n", path.display()));
+                                cur.push_str(&format!("Готово! Создана сессия: {}\n", session_path.display()));
                                 ui.set_imp_console_text(cur.into());
-                                rf();
+
+                                // Ensure emotes
+                                let h2 = h.clone();
+                                let ch_clone = ch_for_thread.clone();
+                                let sp_clone = session_path.clone();
+                                let cr_clone = cache_root.clone();
+                                let rf_clone = rf.clone();
+
+                                std::thread::spawn(move || {
+                                    let rt2 = tokio::runtime::Builder::new_current_thread()
+                                        .enable_all()
+                                        .build()
+                                        .unwrap();
+
+                                    let log_cb2 = move |msg: String| {
+                                        let h_inner = h2.clone();
+                                        let _ = slint::invoke_from_event_loop(move || {
+                                            if let Some(ui) = h_inner.upgrade() {
+                                                let mut text = ui.get_imp_console_text().to_string();
+                                                text.push_str(&msg);
+                                                text.push('\n');
+                                                ui.set_imp_console_text(text.into());
+                                            }
+                                        });
+                                    };
+
+                                    let _ = rt2.block_on(emotes::ensure_session_emotes(
+                                        &sp_clone,
+                                        &ch_clone,
+                                        None,
+                                        &cr_clone,
+                                        log_cb2,
+                                    ));
+
+                                    let _ = slint::invoke_from_event_loop(move || {
+                                        rf_clone();
+                                    });
+                                });
                             }
                             Err(e) => {
                                 let mut cur = ui.get_imp_console_text().to_string();
