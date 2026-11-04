@@ -268,8 +268,8 @@ export component MainWindow inherits Window {
                                         Text { width: 48px; text: rec.parts_count + " ч."; color: root.c_text_dim; vertical-alignment: center; }
                                         Text { width: 75px; text: rec.duration_str; color: root.c_text; vertical-alignment: center; }
                                         Text { width: 75px; text: rec.size_str; color: root.c_text_dim; vertical-alignment: center; }
-                                        Text { width: 45px; text: rec.has_chat ? "✓" : "✗"; color: rec.has_chat ? #00c853 : #e53935; horizontal-alignment: center; vertical-alignment: center; }
-                                        Text { width: 55px; text: rec.has_emotes ? "✓" : "✗"; color: rec.has_emotes ? #00c853 : #e53935; horizontal-alignment: center; vertical-alignment: center; }
+                                        Text { width: 45px; text: rec.has_chat ? "✓" : ""; color: #00c853; horizontal-alignment: center; vertical-alignment: center; }
+                                        Text { width: 55px; text: rec.has_emotes ? "✓" : ""; color: #00c853; horizontal-alignment: center; vertical-alignment: center; }
                                     }
                                 }
                             }
