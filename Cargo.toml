@@ -6,6 +6,12 @@ authors = ["Twitch mpv Overlay Developers"]
 description = "High-performance native mpv C-plugin for real-time Twitch stream chat overlay with emotes and badges"
 license = "MIT"
 
+[workspace]
+members = [
+    ".",
+    "launcher-slint",
+]
+
 [lib]
 name = "twitch_chat"
 crate-type = ["cdylib"]

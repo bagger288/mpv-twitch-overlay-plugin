@@ -1,0 +1,508 @@
+import { Button, ScrollView, LineEdit, CheckBox, ComboBox } from "std-widgets.slint";
+
+export struct RecordingItem {
+    id: string,
+    date_str: string,
+    parts_count: int,
+    duration_str: string,
+    size_str: string,
+    has_chat: bool,
+    has_emotes: bool,
+}
+
+export struct ChannelItem {
+    name: string,
+    count: int,
+}
+
+export component MainWindow inherits Window {
+    title: "Twitch · mpv";
+    min-width: 500px;
+    min-height: 640px;
+    preferred-width: 600px;
+    preferred-height: 780px;
+    background: #18181b;
+
+    // Palette
+    out property <color> c_bg: #18181b;
+    out property <color> c_card: #1f1f23;
+    out property <color> c_input: #26262c;
+    out property <color> c_accent: #9146ff;
+    out property <color> c_accent_hover: #772ce8;
+    out property <color> c_text: #efeff1;
+    out property <color> c_text_dim: #adadb8;
+    out property <color> c_title: #bf94ff;
+    out property <color> c_btn_bg: #2d2d35;
+    out property <color> c_btn_hover: #3b3b44;
+
+    // State properties
+    in-out property <int> active_tab: 0;
+
+    // Callbacks
+    callback select_tab(int);
+    callback refresh_records();
+    callback open_records_folder();
+    callback open_session_folder();
+    callback launch_mpv();
+    callback select_channel(string);
+    callback select_recording(string);
+
+    callback run_import();
+    callback browse_import_video();
+
+    callback toggle_recording();
+    callback toggle_pc_agent();
+    callback clear_pc_agent_console();
+
+    callback refresh_token_manually();
+    callback save_settings();
+
+    // Data models
+    in property <[ChannelItem]> channels: [];
+    in-out property <string> selected_channel: "";
+    in property <[RecordingItem]> recordings: [];
+    in-out property <string> selected_recording_id: "";
+
+    // Tab 2 Import properties
+    in-out property <string> imp_channel: "";
+    in-out property <string> imp_video: "";
+    in-out property <string> imp_time: "";
+    in-out property <bool> imp_auto_detect: true;
+    in-out property <string> imp_dates: "";
+    in property <string> imp_console_text: "";
+    in property <bool> imp_busy: false;
+
+    // Tab 3 Live Recorder properties
+    in-out property <string> rec_channel: "";
+    in-out property <string> rec_quality: "best";
+    in property <bool> rec_active: false;
+    in property <string> rec_status_text: "Готов к записи";
+    in property <string> rec_console_text: "";
+
+    // Tab 4 PC Agent properties
+    in property <bool> agent_active: false;
+    in property <string> agent_status_text: "Листенер остановлен";
+    in property <string> agent_console_text: "";
+
+    // Tab 5 Settings properties
+    in-out property <string> cfg_streamlink: "streamlink";
+    in-out property <string> cfg_mpv: "mpv";
+    in-out property <string> cfg_python: "python";
+    in-out property <string> cfg_client_id: "";
+    in-out property <string> cfg_app_token: "";
+    in-out property <string> cfg_client_secret: "";
+    in-out property <string> cfg_refresh_token: "";
+    in property <string> cfg_token_status: "Токен обновляется при запуске";
+    in-out property <string> cfg_records_dir: "records";
+    in-out property <string> cfg_server_url: "";
+    in-out property <string> cfg_proxy_playlist: "";
+    in-out property <string> cfg_engine: "Auto";
+
+    VerticalLayout {
+        padding: 12px;
+        spacing: 8px;
+
+        // Header bar
+        VerticalLayout {
+            spacing: 2px;
+            Text {
+                text: "Twitch · mpv";
+                font-size: 14pt;
+                font-weight: 700;
+                color: root.c_title;
+            }
+            Text {
+                text: "Записи, чат и синхронизация";
+                font-size: 9pt;
+                color: root.c_text_dim;
+            }
+        }
+
+        // Tab Navigation Buttons
+        HorizontalLayout {
+            spacing: 4px;
+            height: 34px;
+
+            for tab_title[i] in ["Записи", "Импорт", "Запись", "PC Agent", "Настройки"]: Rectangle {
+                background: root.active_tab == i ? root.c_accent : root.c_card;
+                border-radius: 4px;
+
+                TouchArea {
+                    clicked => {
+                        root.active_tab = i;
+                        root.select_tab(i);
+                    }
+                }
+
+                Text {
+                    text: tab_title;
+                    color: root.active_tab == i ? #ffffff : root.c_text;
+                    font-size: 10pt;
+                    font-weight: root.active_tab == i ? 700 : 400;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+
+        // Tab Content Area
+        Rectangle {
+            background: root.c_card;
+            border-radius: 6px;
+            clip: true;
+
+            // Tab 1: Records
+            if root.active_tab == 0: VerticalLayout {
+                padding: 10px;
+                spacing: 8px;
+
+                HorizontalLayout {
+                    spacing: 8px;
+
+                    // Left channel column
+                    VerticalLayout {
+                        width: 150px;
+                        spacing: 4px;
+
+                        Text {
+                            text: "КАНАЛЫ";
+                            font-size: 9pt;
+                            font-weight: 700;
+                            color: root.c_text_dim;
+                        }
+
+                        ScrollView {
+                            VerticalLayout {
+                                spacing: 2px;
+                                for ch in root.channels: Rectangle {
+                                    height: 28px;
+                                    background: root.selected_channel == ch.name ? root.c_accent : root.c_input;
+                                    border-radius: 3px;
+                                    TouchArea {
+                                        clicked => {
+                                            root.selected_channel = ch.name;
+                                            root.select_channel(ch.name);
+                                        }
+                                    }
+                                    HorizontalLayout {
+                                        padding-left: 6px;
+                                        padding-right: 6px;
+                                        Text {
+                                            text: ch.name + " (" + ch.count + ")";
+                                            color: #ffffff;
+                                            font-size: 9.5pt;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Right table view
+                    VerticalLayout {
+                        spacing: 6px;
+
+                        // Toolbar
+                        HorizontalLayout {
+                            height: 28px;
+                            Text {
+                                text: root.selected_channel != "" ? "Записи канала: " + root.selected_channel : "Выберите канал";
+                                font-size: 10pt;
+                                font-weight: 700;
+                                color: #ffffff;
+                                vertical-alignment: center;
+                            }
+                            Rectangle { } // Spacer
+                            Button {
+                                text: "Папка";
+                                clicked => { root.open_records_folder(); }
+                            }
+                            Button {
+                                text: "Обновить";
+                                clicked => { root.refresh_records(); }
+                            }
+                        }
+
+                        // Recordings List
+                        ScrollView {
+                            VerticalLayout {
+                                spacing: 2px;
+                                for rec in root.recordings: Rectangle {
+                                    height: 32px;
+                                    background: root.selected_recording_id == rec.id ? root.c_accent : root.c_input;
+                                    border-radius: 4px;
+                                    TouchArea {
+                                        clicked => {
+                                            root.selected_recording_id = rec.id;
+                                            root.select_recording(rec.id);
+                                        }
+                                        double-clicked => {
+                                            root.selected_recording_id = rec.id;
+                                            root.launch_mpv();
+                                        }
+                                    }
+                                    HorizontalLayout {
+                                        padding-left: 8px;
+                                        padding-right: 8px;
+                                        spacing: 6px;
+                                        Text { width: 140px; text: rec.date_str; color: #ffffff; vertical-alignment: center; }
+                                        Text { width: 45px; text: rec.parts_count + " ч."; color: root.c_text_dim; vertical-alignment: center; }
+                                        Text { width: 75px; text: rec.duration_str; color: root.c_text; vertical-alignment: center; }
+                                        Text { width: 70px; text: rec.size_str; color: root.c_text_dim; vertical-alignment: center; }
+                                        Text { width: 35px; text: rec.has_chat ? "✓" : "✗"; color: rec.has_chat ? #00c853 : #e53935; vertical-alignment: center; }
+                                        Text { width: 35px; text: rec.has_emotes ? "✓" : "✗"; color: rec.has_emotes ? #00c853 : #e53935; vertical-alignment: center; }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Footer
+                HorizontalLayout {
+                    height: 36px;
+                    spacing: 8px;
+                    Text {
+                        text: "Двойной клик — запуск";
+                        color: root.c_text_dim;
+                        font-size: 8.5pt;
+                        vertical-alignment: center;
+                    }
+                    Rectangle { } // Spacer
+                    Button {
+                        text: "Папка сессии";
+                        clicked => { root.open_session_folder(); }
+                    }
+                    Button {
+                        text: "▶ Смотреть в mpv";
+                        primary: true;
+                        clicked => { root.launch_mpv(); }
+                    }
+                }
+            }
+
+            // Tab 2: Import
+            if root.active_tab == 1: VerticalLayout {
+                padding: 10px;
+                spacing: 8px;
+
+                Text { text: "Импорт чата для существующих видео"; font-size: 11pt; font-weight: 700; color: root.c_title; }
+                Text { text: "Канал Twitch:"; font-size: 9pt; color: root.c_text_dim; }
+                LineEdit { text <=> root.imp_channel; placeholder-text: "например, evelone192"; }
+
+                Text { text: "Видео:"; font-size: 9pt; color: root.c_text_dim; }
+                HorizontalLayout {
+                    spacing: 6px;
+                    LineEdit { text <=> root.imp_video; placeholder-text: "Пути к файлам video.ts / mp4 через ';'"; }
+                    Button { text: "Обзор…"; clicked => { root.browse_import_video(); } }
+                }
+
+                Text { text: "Старт (UTC): YYYY-MM-DD HH:MM:SS"; font-size: 9pt; color: root.c_text_dim; }
+                LineEdit { text <=> root.imp_time; }
+
+                CheckBox { text: "Автоопределение старта по сообщениям"; checked <=> root.imp_auto_detect; }
+
+                Text { text: "Даты архива (UTC): YYYY-MM-DD, …"; font-size: 9pt; color: root.c_text_dim; }
+                LineEdit { text <=> root.imp_dates; }
+
+                HorizontalLayout {
+                    Button {
+                        text: "Создать сессию из архива";
+                        primary: true;
+                        enabled: !root.imp_busy;
+                        clicked => { root.run_import(); }
+                    }
+                    Rectangle { }
+                }
+
+                // Log console
+                Rectangle {
+                    background: #141417;
+                    border-radius: 4px;
+                    ScrollView {
+                        VerticalLayout {
+                            padding: 6px;
+                            Text {
+                                text: root.imp_console_text;
+                                color: root.c_text;
+                                font-family: "Consolas";
+                                font-size: 8.5pt;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Tab 3: Record
+            if root.active_tab == 2: VerticalLayout {
+                padding: 10px;
+                spacing: 8px;
+
+                Text { text: "Запись стрима и чата"; font-size: 11pt; font-weight: 700; color: root.c_title; }
+                Text { text: "Канал Twitch:"; font-size: 9pt; color: root.c_text_dim; }
+                LineEdit { text <=> root.rec_channel; placeholder-text: "Twitch канал (например, shroud)"; }
+
+                Text { text: "Качество:"; font-size: 9pt; color: root.c_text_dim; }
+                HorizontalLayout {
+                    spacing: 6px;
+                    Button { text: root.rec_quality; clicked => {
+                        if root.rec_quality == "best" { root.rec_quality = "1080p60"; }
+                        else if root.rec_quality == "1080p60" { root.rec_quality = "720p60"; }
+                        else if root.rec_quality == "720p60" { root.rec_quality = "480p"; }
+                        else if root.rec_quality == "480p" { root.rec_quality = "worst"; }
+                        else { root.rec_quality = "best"; }
+                    } }
+                    Rectangle { }
+                }
+
+                HorizontalLayout {
+                    Button {
+                        text: root.rec_active ? "⏹ Остановить запись" : "🔴 Начать запись";
+                        primary: true;
+                        clicked => { root.toggle_recording(); }
+                    }
+                    Rectangle { }
+                }
+
+                Text { text: root.rec_status_text; color: root.c_text_dim; font-size: 9.5pt; }
+
+                // Recorder console
+                Rectangle {
+                    background: #141417;
+                    border-radius: 4px;
+                    ScrollView {
+                        VerticalLayout {
+                            padding: 6px;
+                            Text {
+                                text: root.rec_console_text;
+                                color: root.c_text;
+                                font-family: "Consolas";
+                                font-size: 8.5pt;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Tab 4: PC Agent
+            if root.active_tab == 3: VerticalLayout {
+                padding: 10px;
+                spacing: 8px;
+
+                Text { text: "Автоматическая запись (PC Agent)"; font-size: 11pt; font-weight: 700; color: root.c_title; }
+                Text { text: "Подключается к серверу мониторинга и автоматически записывает стримы"; font-size: 9pt; color: root.c_text_dim; }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    Button {
+                        text: root.agent_active ? "⏹ Стоп" : "▶ Старт";
+                        primary: true;
+                        clicked => { root.toggle_pc_agent(); }
+                    }
+                    Button {
+                        text: "Очистить";
+                        clicked => { root.clear_pc_agent_console(); }
+                    }
+                    Rectangle { }
+                }
+
+                Text {
+                    text: root.agent_status_text;
+                    color: root.agent_active ? #00c853 : root.c_text_dim;
+                    font-size: 9.5pt;
+                    font-weight: 700;
+                }
+
+                // Console
+                Rectangle {
+                    background: #141417;
+                    border-radius: 4px;
+                    ScrollView {
+                        VerticalLayout {
+                            padding: 6px;
+                            Text {
+                                text: root.agent_console_text;
+                                color: root.c_text;
+                                font-family: "Consolas";
+                                font-size: 8.5pt;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Tab 5: Settings
+            if root.active_tab == 4: VerticalLayout {
+                padding: 10px;
+                spacing: 8px;
+
+                ScrollView {
+                    VerticalLayout {
+                        spacing: 8px;
+                        padding-right: 10px;
+
+                        Text { text: "Настройки путей и Twitch API"; font-size: 11pt; font-weight: 700; color: root.c_title; }
+
+                        Text { text: "Путь к Streamlink:"; font-size: 9pt; color: root.c_text_dim; }
+                        LineEdit { text <=> root.cfg_streamlink; }
+
+                        Text { text: "Путь к mpv:"; font-size: 9pt; color: root.c_text_dim; }
+                        LineEdit { text <=> root.cfg_mpv; }
+
+                        Text { text: "Путь к Python / утилитам:"; font-size: 9pt; color: root.c_text_dim; }
+                        LineEdit { text <=> root.cfg_python; }
+
+                        Text { text: "Twitch Client ID:"; font-size: 9pt; color: root.c_text_dim; }
+                        LineEdit { text <=> root.cfg_client_id; }
+
+                        Text { text: "Twitch App/User Token:"; font-size: 9pt; color: root.c_text_dim; }
+                        LineEdit { text <=> root.cfg_app_token; input-type: password; }
+
+                        Text { text: "Twitch Client Secret:"; font-size: 9pt; color: root.c_text_dim; }
+                        LineEdit { text <=> root.cfg_client_secret; input-type: password; }
+
+                        Text { text: "Twitch Refresh Token:"; font-size: 9pt; color: root.c_text_dim; }
+                        LineEdit { text <=> root.cfg_refresh_token; input-type: password; }
+
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Button { text: "Обновить токен"; clicked => { root.refresh_token_manually(); } }
+                            Text { text: root.cfg_token_status; color: root.c_text_dim; vertical-alignment: center; }
+                            Rectangle { }
+                        }
+
+                        Text { text: "Папка records:"; font-size: 9pt; color: root.c_text_dim; }
+                        LineEdit { text <=> root.cfg_records_dir; }
+
+                        Text { text: "SERVER_URL (сервер мониторинга):"; font-size: 9pt; color: root.c_text_dim; }
+                        LineEdit { text <=> root.cfg_server_url; placeholder-text: "https://your-bot-server.com"; }
+
+                        Text { text: "Twitch Proxy Playlist (--twitch-proxy-playlist):"; font-size: 9pt; color: root.c_text_dim; }
+                        LineEdit { text <=> root.cfg_proxy_playlist; placeholder-text: "прокси через запятую"; }
+
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Text { text: "Движок чата: " + root.cfg_engine; color: root.c_text; vertical-alignment: center; }
+                            Button { text: "Переключить (Auto/Rust/Lua)"; clicked => {
+                                if root.cfg_engine == "Auto" { root.cfg_engine = "Rust"; }
+                                else if root.cfg_engine == "Rust" { root.cfg_engine = "Lua"; }
+                                else { root.cfg_engine = "Auto"; }
+                            } }
+                            Rectangle { }
+                        }
+
+                        HorizontalLayout {
+                            Rectangle { }
+                            Button {
+                                text: "Сохранить настройки";
+                                primary: true;
+                                clicked => { root.save_settings(); }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
