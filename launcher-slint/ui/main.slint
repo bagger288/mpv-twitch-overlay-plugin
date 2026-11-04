@@ -16,10 +16,10 @@ export struct ChannelItem {
 }
 
 export component MainWindow inherits Window {
-    title: "Twitch · mpv";
-    min-width: 500px;
+    title: "Twitch recorder";
+    min-width: 560px;
     min-height: 640px;
-    preferred-width: 600px;
+    preferred-width: 680px;
     preferred-height: 780px;
     background: #18181b;
 
@@ -106,13 +106,13 @@ export component MainWindow inherits Window {
         VerticalLayout {
             spacing: 2px;
             Text {
-                text: "Twitch · mpv";
+                text: "Twitch recorder";
                 font-size: 14pt;
                 font-weight: 700;
                 color: root.c_title;
             }
             Text {
-                text: "Записи, чат и синхронизация";
+                text: "Запись стримов и чата";
                 font-size: 9pt;
                 color: root.c_text_dim;
             }
@@ -224,6 +224,24 @@ export component MainWindow inherits Window {
                             }
                         }
 
+                        // Table Header
+                        Rectangle {
+                            height: 26px;
+                            background: #2b2b30;
+                            border-radius: 4px;
+                            HorizontalLayout {
+                                padding-left: 8px;
+                                padding-right: 8px;
+                                spacing: 6px;
+                                Text { width: 145px; text: "Дата и время"; font-size: 9pt; font-weight: 700; color: #ffffff; vertical-alignment: center; }
+                                Text { width: 48px; text: "Части"; font-size: 9pt; font-weight: 700; color: #ffffff; vertical-alignment: center; }
+                                Text { width: 75px; text: "Время"; font-size: 9pt; font-weight: 700; color: #ffffff; vertical-alignment: center; }
+                                Text { width: 75px; text: "Размер"; font-size: 9pt; font-weight: 700; color: #ffffff; vertical-alignment: center; }
+                                Text { width: 45px; text: "Чат"; font-size: 9pt; font-weight: 700; color: #ffffff; horizontal-alignment: center; vertical-alignment: center; }
+                                Text { width: 55px; text: "Эмоуты"; font-size: 9pt; font-weight: 700; color: #ffffff; horizontal-alignment: center; vertical-alignment: center; }
+                            }
+                        }
+
                         // Recordings List
                         ScrollView {
                             VerticalLayout {
@@ -246,12 +264,12 @@ export component MainWindow inherits Window {
                                         padding-left: 8px;
                                         padding-right: 8px;
                                         spacing: 6px;
-                                        Text { width: 140px; text: rec.date_str; color: #ffffff; vertical-alignment: center; }
-                                        Text { width: 45px; text: rec.parts_count + " ч."; color: root.c_text_dim; vertical-alignment: center; }
+                                        Text { width: 145px; text: rec.date_str; color: #ffffff; vertical-alignment: center; }
+                                        Text { width: 48px; text: rec.parts_count + " ч."; color: root.c_text_dim; vertical-alignment: center; }
                                         Text { width: 75px; text: rec.duration_str; color: root.c_text; vertical-alignment: center; }
-                                        Text { width: 70px; text: rec.size_str; color: root.c_text_dim; vertical-alignment: center; }
-                                        Text { width: 35px; text: rec.has_chat ? "✓" : "✗"; color: rec.has_chat ? #00c853 : #e53935; vertical-alignment: center; }
-                                        Text { width: 35px; text: rec.has_emotes ? "✓" : "✗"; color: rec.has_emotes ? #00c853 : #e53935; vertical-alignment: center; }
+                                        Text { width: 75px; text: rec.size_str; color: root.c_text_dim; vertical-alignment: center; }
+                                        Text { width: 45px; text: rec.has_chat ? "✓" : "✗"; color: rec.has_chat ? #00c853 : #e53935; horizontal-alignment: center; vertical-alignment: center; }
+                                        Text { width: 55px; text: rec.has_emotes ? "✓" : "✗"; color: rec.has_emotes ? #00c853 : #e53935; horizontal-alignment: center; vertical-alignment: center; }
                                     }
                                 }
                             }
@@ -289,7 +307,7 @@ export component MainWindow inherits Window {
 
                 Text { text: "Импорт чата для существующих видео"; font-size: 11pt; font-weight: 700; color: root.c_title; }
                 Text { text: "Канал Twitch:"; font-size: 9pt; color: root.c_text_dim; }
-                LineEdit { text <=> root.imp_channel; placeholder-text: "например, evelone192"; }
+                LineEdit { text <=> root.imp_channel; }
 
                 Text { text: "Видео:"; font-size: 9pt; color: root.c_text_dim; }
                 HorizontalLayout {
@@ -301,7 +319,42 @@ export component MainWindow inherits Window {
                 Text { text: "Старт (UTC): YYYY-MM-DD HH:MM:SS"; font-size: 9pt; color: root.c_text_dim; }
                 LineEdit { text <=> root.imp_time; }
 
-                CheckBox { text: "Автоопределение старта по сообщениям"; checked <=> root.imp_auto_detect; }
+                HorizontalLayout {
+                    spacing: 8px;
+                    height: 24px;
+                    Rectangle {
+                        width: 18px;
+                        height: 18px;
+                        border-width: 1.5px;
+                        border-color: root.imp_auto_detect ? root.c_accent : root.c_text_dim;
+                        border-radius: 3px;
+                        background: root.imp_auto_detect ? root.c_accent : root.c_input;
+                        y: 3px;
+
+                        if root.imp_auto_detect: Text {
+                            text: "✓";
+                            color: #ffffff;
+                            font-size: 10pt;
+                            font-weight: 700;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+
+                        TouchArea {
+                            clicked => { root.imp_auto_detect = !root.imp_auto_detect; }
+                        }
+                    }
+                    Text {
+                        text: "Автоопределение старта по сообщениям";
+                        color: root.c_text;
+                        font-size: 9.5pt;
+                        vertical-alignment: center;
+                        TouchArea {
+                            clicked => { root.imp_auto_detect = !root.imp_auto_detect; }
+                        }
+                    }
+                    Rectangle { }
+                }
 
                 Text { text: "Даты архива (UTC): YYYY-MM-DD, …"; font-size: 9pt; color: root.c_text_dim; }
                 LineEdit { text <=> root.imp_dates; }
@@ -341,18 +394,15 @@ export component MainWindow inherits Window {
 
                 Text { text: "Запись стрима и чата"; font-size: 11pt; font-weight: 700; color: root.c_title; }
                 Text { text: "Канал Twitch:"; font-size: 9pt; color: root.c_text_dim; }
-                LineEdit { text <=> root.rec_channel; placeholder-text: "Twitch канал (например, shroud)"; }
+                LineEdit { text <=> root.rec_channel; }
 
                 Text { text: "Качество:"; font-size: 9pt; color: root.c_text_dim; }
                 HorizontalLayout {
-                    spacing: 6px;
-                    Button { text: root.rec_quality; clicked => {
-                        if root.rec_quality == "best" { root.rec_quality = "1080p60"; }
-                        else if root.rec_quality == "1080p60" { root.rec_quality = "720p60"; }
-                        else if root.rec_quality == "720p60" { root.rec_quality = "480p"; }
-                        else if root.rec_quality == "480p" { root.rec_quality = "worst"; }
-                        else { root.rec_quality = "best"; }
-                    } }
+                    ComboBox {
+                        width: 140px;
+                        model: ["best", "1080p60", "720p60", "480p", "worst"];
+                        current-value <=> root.rec_quality;
+                    }
                     Rectangle { }
                 }
 
