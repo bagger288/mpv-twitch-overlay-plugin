@@ -569,11 +569,13 @@ fn main() -> Result<(), slint::PlatformError> {
         let refresh_fn = refresh_ui_records.clone();
 
         main_window.on_run_import(move || {
-            let (ch, video_str, dates_str) = if let Some(ui) = handle_weak.upgrade() {
+            let (ch, video_str, dates_str, time_str, auto_detect) = if let Some(ui) = handle_weak.upgrade() {
                 (
                     ui.get_imp_channel().to_string(),
                     ui.get_imp_video().to_string(),
                     ui.get_imp_dates().to_string(),
+                    ui.get_imp_time().to_string(),
+                    ui.get_imp_auto_detect(),
                 )
             } else {
                 return;
@@ -607,6 +609,19 @@ fn main() -> Result<(), slint::PlatformError> {
             if parsed_dates.is_empty() {
                 parsed_dates.push(chrono::Utc::now().date_naive());
             }
+
+            let start_dt = if !time_str.trim().is_empty() {
+                let trimmed = time_str.trim();
+                if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%d %H:%M:%S") {
+                    Some(chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(naive, chrono::Utc))
+                } else if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(trimmed) {
+                    Some(dt.with_timezone(&chrono::Utc))
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
 
             if let Some(ui) = handle_weak.upgrade() {
                 ui.set_imp_busy(true);
@@ -642,8 +657,8 @@ fn main() -> Result<(), slint::PlatformError> {
                     channel: ch_for_thread.clone(),
                     dates: parsed_dates,
                     video_paths,
-                    start_dt: None,
-                    auto_detect: true,
+                    start_dt,
+                    auto_detect,
                     records_dir,
                 };
 

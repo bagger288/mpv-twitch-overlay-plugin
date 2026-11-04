@@ -435,6 +435,18 @@ pub async fn ensure_session_emotes<F: Fn(String) + Send + Sync + 'static>(
         .and_then(|f| f.to_str())
         .unwrap_or("session");
 
+    let session_file = session_dir.join(format!("{}.session.json", folder_name));
+    let room_id_from_manifest = if room_id.is_none() && session_file.is_file() {
+        fs::read_to_string(&session_file).ok().and_then(|c| {
+            serde_json::from_str::<Value>(&c).ok().and_then(|v| {
+                v.get("room_id").and_then(|r| r.as_str()).map(|s| s.to_string())
+            })
+        })
+    } else {
+        None
+    };
+    let effective_room_id = room_id.or(room_id_from_manifest.as_deref());
+
     let emotes_file = session_dir.join(format!("{}.emotes.json", folder_name));
     let chat_file = session_dir.join(format!("{}.chat.jsonl", folder_name));
 
@@ -444,7 +456,7 @@ pub async fn ensure_session_emotes<F: Fn(String) + Send + Sync + 'static>(
         let content = fs::read_to_string(&emotes_file).map_err(|e| e.to_string())?;
         serde_json::from_str(&content).unwrap_or_else(|_| EmoteSnapshot {
             channel: channel.to_string(),
-            room_id: room_id.map(|s| s.to_string()),
+            room_id: effective_room_id.map(|s| s.to_string()),
             words: HashMap::new(),
             badges: HashMap::new(),
             schema_version: 2,
@@ -456,27 +468,27 @@ pub async fn ensure_session_emotes<F: Fn(String) + Send + Sync + 'static>(
         let mut words = HashMap::new();
 
         // 7TV first (highest priority)
-        let s7 = fetch_7tv_emotes(&client, room_id, &log_fn).await;
+        let s7 = fetch_7tv_emotes(&client, effective_room_id, &log_fn).await;
         words.extend(s7);
 
         // BTTV
-        let bttv = fetch_bttv_emotes(&client, room_id, &log_fn).await;
+        let bttv = fetch_bttv_emotes(&client, effective_room_id, &log_fn).await;
         for (k, v) in bttv {
             words.entry(k).or_insert(v);
         }
 
         // FFZ
-        let ffz = fetch_ffz_emotes(&client, room_id, &log_fn).await;
+        let ffz = fetch_ffz_emotes(&client, effective_room_id, &log_fn).await;
         for (k, v) in ffz {
             words.entry(k).or_insert(v);
         }
 
         // Twitch Badges
-        let badges = fetch_badges(&client, room_id, client_id, token, &log_fn).await;
+        let badges = fetch_badges(&client, effective_room_id, client_id, token, &log_fn).await;
 
         let snap = EmoteSnapshot {
             channel: channel.to_string(),
-            room_id: room_id.map(|s| s.to_string()),
+            room_id: effective_room_id.map(|s| s.to_string()),
             words,
             badges,
             schema_version: 2,
