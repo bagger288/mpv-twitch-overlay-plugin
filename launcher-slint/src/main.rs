@@ -18,10 +18,34 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 fn get_project_root() -> PathBuf {
-    std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-        .unwrap_or_else(|| PathBuf::from("."))
+    // 1. Check if current working directory has config.json or records
+    if let Ok(cwd) = std::env::current_dir() {
+        if cwd.join("config.json").is_file() || cwd.join("records").is_dir() {
+            return cwd;
+        }
+    }
+
+    // 2. Check executable directory
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            if parent.join("config.json").is_file() || parent.join("records").is_dir() {
+                return parent.to_path_buf();
+            }
+
+            // 3. If running inside target/debug or target/release, traverse up to workspace root
+            if let Some(target_dir) = parent.parent() {
+                if target_dir.file_name().and_then(|n| n.to_str()) == Some("target") {
+                    if let Some(proj_root) = target_dir.parent() {
+                        return proj_root.to_path_buf();
+                    }
+                }
+            }
+
+            return parent.to_path_buf();
+        }
+    }
+
+    PathBuf::from(".")
 }
 
 fn main() -> Result<(), slint::PlatformError> {
