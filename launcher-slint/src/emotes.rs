@@ -14,12 +14,26 @@ pub struct EmoteMeta {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BadgeMeta {
+    pub provider: String,
+    pub source: String,
+    pub set_id: String,
+    pub version: String,
+    pub url: String,
+    pub file: String,
+    #[serde(default)]
+    pub channel: bool,
+    #[serde(default)]
+    pub scope: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmoteSnapshot {
     pub channel: String,
     pub room_id: Option<String>,
     pub words: HashMap<String, EmoteMeta>,
     #[serde(default)]
-    pub badges: HashMap<String, Value>,
+    pub badges: HashMap<String, BadgeMeta>,
     #[serde(default)]
     pub schema_version: u32,
     #[serde(default)]
@@ -263,10 +277,151 @@ fn parse_ffz_sets(val: &Value, scope: &str, out: &mut HashMap<String, EmoteMeta>
     }
 }
 
+pub async fn fetch_badges(
+    client: &reqwest::Client,
+    room_id: Option<&str>,
+    client_id: Option<&str>,
+    token: Option<&str>,
+    log_fn: &(impl Fn(String) + Send + Sync),
+) -> HashMap<String, BadgeMeta> {
+    let mut map = HashMap::new();
+    let use_helix = client_id.map(|s| !s.is_empty()).unwrap_or(false)
+        && token.map(|s| !s.is_empty()).unwrap_or(false);
+
+    log_fn("[Badges] Запрос глобальных значков Twitch...".to_string());
+    if use_helix {
+        let clean_token = token.unwrap().trim_start_matches("oauth:").trim_start_matches("Bearer ");
+        if let Ok(res) = client
+            .get("https://api.twitch.tv/helix/chat/badges/global")
+            .header("Client-Id", client_id.unwrap())
+            .header("Authorization", format!("Bearer {}", clean_token))
+            .send()
+            .await
+        {
+            if let Ok(v) = res.json::<Value>().await {
+                parse_helix_badges(&v, false, &mut map);
+            }
+        }
+    } else {
+        if let Ok(res) = client
+            .get("https://badges.twitch.tv/v1/badges/global/display")
+            .send()
+            .await
+        {
+            if let Ok(v) = res.json::<Value>().await {
+                parse_legacy_badges(&v, false, &mut map);
+            }
+        }
+    }
+
+    if let Some(rid) = room_id {
+        if !rid.is_empty() {
+            log_fn(format!("[Badges] Запрос значков канала Twitch (room_id: {})...", rid));
+            if use_helix {
+                let clean_token = token.unwrap().trim_start_matches("oauth:").trim_start_matches("Bearer ");
+                let url = format!("https://api.twitch.tv/helix/chat/badges?broadcaster_id={}", rid);
+                if let Ok(res) = client
+                    .get(&url)
+                    .header("Client-Id", client_id.unwrap())
+                    .header("Authorization", format!("Bearer {}", clean_token))
+                    .send()
+                    .await
+                {
+                    if let Ok(v) = res.json::<Value>().await {
+                        parse_helix_badges(&v, true, &mut map);
+                    }
+                }
+            } else {
+                let url = format!("https://badges.twitch.tv/v1/badges/channels/{}/display", rid);
+                if let Ok(res) = client.get(&url).send().await {
+                    if let Ok(v) = res.json::<Value>().await {
+                        parse_legacy_badges(&v, true, &mut map);
+                    }
+                }
+            }
+        }
+    }
+
+    log_fn(format!("[Badges] Найдено значков: {}", map.len()));
+    map
+}
+
+fn parse_legacy_badges(val: &Value, is_channel: bool, out: &mut HashMap<String, BadgeMeta>) {
+    if let Some(sets) = val.get("badge_sets").and_then(|s| s.as_object()) {
+        for (set_id, set_data) in sets {
+            if let Some(versions) = set_data.get("versions").and_then(|v| v.as_object()) {
+                for (ver_id, ver_data) in versions {
+                    let url = ver_data
+                        .get("image_url_2x")
+                        .or_else(|| ver_data.get("image_url_4x"))
+                        .or_else(|| ver_data.get("image_url_1x"))
+                        .and_then(|u| u.as_str())
+                        .unwrap_or("");
+                    if !url.is_empty() {
+                        let key = format!("{}/{}", set_id, ver_id);
+                        let file = format!("badges/{}_{}.png", set_id, ver_id);
+                        out.insert(
+                            key,
+                            BadgeMeta {
+                                provider: "twitch".to_string(),
+                                source: "twitch".to_string(),
+                                set_id: set_id.clone(),
+                                version: ver_id.clone(),
+                                url: url.to_string(),
+                                file,
+                                channel: is_channel,
+                                scope: if is_channel { "channel".to_string() } else { "global".to_string() },
+                            },
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn parse_helix_badges(val: &Value, is_channel: bool, out: &mut HashMap<String, BadgeMeta>) {
+    if let Some(data) = val.get("data").and_then(|d| d.as_array()) {
+        for item in data {
+            let set_id = item.get("set_id").and_then(|s| s.as_str()).unwrap_or("");
+            if let Some(versions) = item.get("versions").and_then(|v| v.as_array()) {
+                for ver in versions {
+                    let ver_id = ver.get("id").and_then(|i| i.as_str()).unwrap_or("");
+                    let url = ver
+                        .get("image_url_2x")
+                        .or_else(|| ver.get("image_url_4x"))
+                        .or_else(|| ver.get("image_url_1x"))
+                        .and_then(|u| u.as_str())
+                        .unwrap_or("");
+                    if !set_id.is_empty() && !ver_id.is_empty() && !url.is_empty() {
+                        let key = format!("{}/{}", set_id, ver_id);
+                        let file = format!("badges/{}_{}.png", set_id, ver_id);
+                        out.insert(
+                            key,
+                            BadgeMeta {
+                                provider: "twitch".to_string(),
+                                source: "twitch".to_string(),
+                                set_id: set_id.to_string(),
+                                version: ver_id.to_string(),
+                                url: url.to_string(),
+                                file,
+                                channel: is_channel,
+                                scope: if is_channel { "channel".to_string() } else { "global".to_string() },
+                            },
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
 pub async fn ensure_session_emotes<F: Fn(String) + Send + Sync + 'static>(
     session_dir: &Path,
     channel: &str,
     room_id: Option<&str>,
+    client_id: Option<&str>,
+    token: Option<&str>,
     cache_root: &Path,
     log_fn: F,
 ) -> Result<(), String> {
@@ -296,7 +451,7 @@ pub async fn ensure_session_emotes<F: Fn(String) + Send + Sync + 'static>(
             cache_root: cache_root.to_string_lossy().to_string(),
         })
     } else {
-        log_fn(format!("[Emotes] Создание нового снимка эмоутов для канала #{}...", channel));
+        log_fn(format!("[Emotes] Создание нового снимка эмоутов и баджей для канала #{}...", channel));
 
         let mut words = HashMap::new();
 
@@ -316,36 +471,68 @@ pub async fn ensure_session_emotes<F: Fn(String) + Send + Sync + 'static>(
             words.entry(k).or_insert(v);
         }
 
+        // Twitch Badges
+        let badges = fetch_badges(&client, room_id, client_id, token, &log_fn).await;
+
         let snap = EmoteSnapshot {
             channel: channel.to_string(),
             room_id: room_id.map(|s| s.to_string()),
             words,
-            badges: HashMap::new(),
+            badges,
             schema_version: 2,
             cache_root: cache_root.to_string_lossy().to_string(),
         };
 
         if let Ok(json_str) = serde_json::to_string_pretty(&snap) {
             let _ = fs::write(&emotes_file, json_str);
-            log_fn(format!("[Emotes] Снимок сохранен: {} эмоутов в {}", snap.words.len(), emotes_file.display()));
+            log_fn(format!(
+                "[Emotes] Снимок сохранен: {} эмоутов, {} значков в {}",
+                snap.words.len(),
+                snap.badges.len(),
+                emotes_file.display()
+            ));
         }
 
         snap
     };
 
-    // 2. Scan chat.jsonl for used emotes
+    // 2. Download Twitch Badges
+    let mut badge_downloaded = 0;
+    let mut badge_cached = 0;
+    let badge_dir = cache_root.join("badges");
+    let _ = fs::create_dir_all(&badge_dir);
+    for badge in snapshot.badges.values() {
+        let target = cache_root.join(&badge.file);
+        if target.is_file() && target.metadata().map(|m| m.len() > 0).unwrap_or(false) {
+            badge_cached += 1;
+            continue;
+        }
+        if let Ok(resp) = client.get(&badge.url).send().await {
+            if resp.status().is_success() {
+                if let Ok(bytes) = resp.bytes().await {
+                    if fs::write(&target, bytes).is_ok() {
+                        badge_downloaded += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Scan chat.jsonl for used words and Twitch native emotes
     if !chat_file.is_file() {
-        log_fn("[Emotes] Чат-файл не найден, пропуск загрузки картинок.".to_string());
+        log_fn("[Emotes] Чат-файл не найден, пропуск загрузки картинок из чата.".to_string());
         return Ok(());
     }
 
     log_fn("[Emotes] Поиск использованных эмоутов в chat.jsonl...".to_string());
     let mut used_words = HashSet::new();
+    let mut used_twitch_ids = HashSet::new();
 
     if let Ok(file) = File::open(&chat_file) {
         let reader = BufReader::new(file);
         for line in reader.lines().flatten() {
             if let Ok(v) = serde_json::from_str::<Value>(&line) {
+                // Word emotes (7TV, BTTV, FFZ)
                 if let Some(msg) = v.get("message").and_then(|m| m.as_str()) {
                     for word in msg.split_whitespace() {
                         if snapshot.words.contains_key(word) {
@@ -353,13 +540,58 @@ pub async fn ensure_session_emotes<F: Fn(String) + Send + Sync + 'static>(
                         }
                     }
                 }
+
+                // Twitch native emotes from "emotes" object or string
+                if let Some(emotes_obj) = v.get("emotes").and_then(|e| e.as_object()) {
+                    for key in emotes_obj.keys() {
+                        if !key.is_empty() {
+                            used_twitch_ids.insert(key.clone());
+                        }
+                    }
+                } else if let Some(emotes_str) = v.get("emotes").and_then(|e| e.as_str()) {
+                    for grp in emotes_str.split('/') {
+                        if let Some((id, _)) = grp.split_once(':') {
+                            if !id.is_empty() {
+                                used_twitch_ids.insert(id.to_string());
+                            }
+                        }
+                    }
+                }
+
+                // Twitch emotes from tags.emotes
+                if let Some(tags) = v.get("tags").and_then(|t| t.as_object()) {
+                    if let Some(emotes_str) = tags.get("emotes").and_then(|e| e.as_str()) {
+                        for grp in emotes_str.split('/') {
+                            if let Some((id, _)) = grp.split_once(':') {
+                                if !id.is_empty() {
+                                used_twitch_ids.insert(id.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Twitch emotes from twitch_emotes array
+                if let Some(t_emotes) = v.get("twitch_emotes").and_then(|te| te.as_array()) {
+                    for item in t_emotes {
+                        if let Some(id) = item.get("id").and_then(|i| i.as_str()) {
+                            if !id.is_empty() {
+                                used_twitch_ids.insert(id.to_string());
+                            }
+                        }
+                    }
+                }
             }
         }
     }
 
-    log_fn(format!("[Emotes] Найдено уникальных эмоутов в чате: {}", used_words.len()));
+    log_fn(format!(
+        "[Emotes] Найдено: сторонних эмоутов: {}, нативных Twitch эмоутов: {}",
+        used_words.len(),
+        used_twitch_ids.len()
+    ));
 
-    // 3. Cache missing emote images
+    // 4. Cache missing 7TV/BTTV/FFZ emote images
     let mut downloaded = 0;
     let mut already_cached = 0;
     let mut failed = 0;
@@ -403,9 +635,36 @@ pub async fn ensure_session_emotes<F: Fn(String) + Send + Sync + 'static>(
         }
     }
 
+    // 5. Cache missing native Twitch emotes
+    let mut twitch_downloaded = 0;
+    let mut twitch_cached = 0;
+    let twitch_dir = cache_root.join("twitch");
+    let _ = fs::create_dir_all(&twitch_dir);
+
+    for eid in &used_twitch_ids {
+        let target_path = twitch_dir.join(format!("{}.png", eid));
+        if target_path.is_file() && target_path.metadata().map(|m| m.len() > 0).unwrap_or(false) {
+            twitch_cached += 1;
+            continue;
+        }
+
+        let url = format!("https://static-cdn.jtvnw.net/emoticons/v2/{}/default/dark/2.0", eid);
+        if let Ok(resp) = client.get(&url).send().await {
+            if resp.status().is_success() {
+                if let Ok(bytes) = resp.bytes().await {
+                    if fs::write(&target_path, bytes).is_ok() {
+                        twitch_downloaded += 1;
+                        log_fn(format!("  [OK] Twitch emote {} -> {}.png", eid, eid));
+                        continue;
+                    }
+                }
+            }
+        }
+    }
+
     log_fn(format!(
-        "[Emotes] Готово! Скачано новых: {}, уже в кэше: {}, ошибок: {}",
-        downloaded, already_cached, failed
+        "[Emotes] Готово! Сторонних эмоутов: +{}/{} (ошибок: {}), Twitch эмоутов: +{}/{}, значков Twitch: +{}/{}",
+        downloaded, already_cached, failed, twitch_downloaded, twitch_cached, badge_downloaded, badge_cached
     ));
 
     Ok(())

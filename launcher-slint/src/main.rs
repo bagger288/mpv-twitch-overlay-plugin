@@ -256,6 +256,8 @@ fn main() -> Result<(), slint::PlatformError> {
                                 &s_clone.dir,
                                 &s_clone.channel,
                                 None,
+                                Some(&cfg.twitch_client_id),
+                                Some(&cfg.twitch_app_token),
                                 &cache_root,
                                 log_cb,
                             ));
@@ -666,6 +668,10 @@ fn main() -> Result<(), slint::PlatformError> {
                                 let sp_clone = session_path.clone();
                                 let cr_clone = cache_root.clone();
                                 let rf_clone = rf.clone();
+                                let (cid_clone, tok_clone) = {
+                                    let cfg = cfg_arc_thread.lock().unwrap();
+                                    (cfg.twitch_client_id.clone(), cfg.twitch_app_token.clone())
+                                };
 
                                 std::thread::spawn(move || {
                                     let rt2 = tokio::runtime::Builder::new_current_thread()
@@ -689,6 +695,8 @@ fn main() -> Result<(), slint::PlatformError> {
                                         &sp_clone,
                                         &ch_clone,
                                         None,
+                                        Some(&cid_clone),
+                                        Some(&tok_clone),
                                         &cr_clone,
                                         log_cb2,
                                     ));
