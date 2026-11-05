@@ -4,6 +4,7 @@
 /tools/
 /build/
 /tg_bot/
+/cut_plugin/
 
 # Python caches and local environments
 __pycache__/
