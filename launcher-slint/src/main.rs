@@ -72,7 +72,6 @@ fn main() -> Result<(), slint::PlatformError> {
         let cfg = config_arc.lock().unwrap();
         main_window.set_cfg_streamlink(cfg.streamlink_path.clone().into());
         main_window.set_cfg_mpv(cfg.mpv_path.clone().into());
-        main_window.set_cfg_python(cfg.python_path.clone().into());
         main_window.set_cfg_client_id(cfg.twitch_client_id.clone().into());
         main_window.set_cfg_app_token(cfg.twitch_app_token.clone().into());
         main_window.set_cfg_client_secret(cfg.twitch_client_secret.clone().into());
@@ -292,7 +291,6 @@ fn main() -> Result<(), slint::PlatformError> {
                 let mut cfg = cfg_arc.lock().unwrap();
                 cfg.streamlink_path = ui.get_cfg_streamlink().to_string();
                 cfg.mpv_path = ui.get_cfg_mpv().to_string();
-                cfg.python_path = ui.get_cfg_python().to_string();
                 cfg.twitch_client_id = ui.get_cfg_client_id().to_string();
                 cfg.twitch_app_token = ui.get_cfg_app_token().to_string();
                 cfg.twitch_client_secret = ui.get_cfg_client_secret().to_string();
