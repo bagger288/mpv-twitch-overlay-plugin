@@ -1,8 +1,11 @@
+#![allow(dead_code)]
+
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+#[allow(dead_code)]
 pub struct ManagedProcess {
     child: Arc<Mutex<Option<Child>>>,
 }

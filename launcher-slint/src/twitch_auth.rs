@@ -1,6 +1,7 @@
 use serde::Deserialize;
 use std::collections::HashMap;
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct TokenResponse {
     pub access_token: String,

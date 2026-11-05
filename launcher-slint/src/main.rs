@@ -1,23 +1,24 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod agent;
 mod config;
 mod emotes;
 mod importer;
 mod player;
 mod process_manager;
+mod recorder;
 mod records;
 mod twitch_auth;
 
 slint::include_modules!();
 
 use config::{load_config, save_config};
-use process_manager::ManagedProcess;
 use records::{scan_records, SessionInfo};
 use slint::{ComponentHandle, ModelRc, VecModel};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 fn get_project_root() -> PathBuf {
@@ -60,8 +61,11 @@ fn main() -> Result<(), slint::PlatformError> {
     let sessions_cache: Arc<Mutex<HashMap<String, Vec<SessionInfo>>>> =
         Arc::new(Mutex::new(HashMap::new()));
 
-    let rec_process = Arc::new(ManagedProcess::new());
-    let agent_process = Arc::new(ManagedProcess::new());
+    let rec_running = Arc::new(AtomicBool::new(false));
+    let rec_stop_signal: Arc<Mutex<Option<Arc<AtomicBool>>>> = Arc::new(Mutex::new(None));
+
+    let agent_running = Arc::new(AtomicBool::new(false));
+    let agent_stop_signal: Arc<Mutex<Option<Arc<AtomicBool>>>> = Arc::new(Mutex::new(None));
 
     // 1. Initialize settings from config
     {
@@ -308,46 +312,38 @@ fn main() -> Result<(), slint::PlatformError> {
     // PC Agent Start/Stop
     {
         let handle_weak = handle.clone();
-        let agent_proc = agent_process.clone();
+        let agent_running_flag = agent_running.clone();
+        let agent_stop_sig = agent_stop_signal.clone();
         let root = root_dir.clone();
         let cfg_arc = config_arc.clone();
 
         main_window.on_toggle_pc_agent(move || {
-            if agent_proc.is_running() {
-                agent_proc.stop();
+            if agent_running_flag.load(Ordering::Relaxed) {
+                if let Some(stop) = agent_stop_sig.lock().unwrap().take() {
+                    stop.store(true, Ordering::Relaxed);
+                }
                 if let Some(ui) = handle_weak.upgrade() {
-                    ui.set_agent_active(false);
-                    ui.set_agent_status_text("Листенер остановлен".into());
+                    ui.set_agent_status_text("Остановка листенера...".into());
                 }
             } else {
-                let (py_bin, server, proxy, records, streamlink) = {
+                let (server, proxy, records, streamlink) = {
                     let cfg = cfg_arc.lock().unwrap();
-                    let miniconda = PathBuf::from(r"C:\Users\User\miniconda3\python.exe");
-                    let py = if (cfg.python_path == "python" || cfg.python_path.is_empty())
-                        && miniconda.is_file()
-                    {
-                        miniconda.to_string_lossy().to_string()
-                    } else {
-                        cfg.python_path.clone()
-                    };
                     (
-                        py,
                         cfg.server_url.clone(),
                         cfg.twitch_proxy_playlist.clone(),
-                        cfg.records_dir.clone(),
+                        root.join(&cfg.records_dir),
                         cfg.streamlink_path.clone(),
                     )
                 };
 
-                let script = root.join("PC_AGENT.py");
-                let mut cmd = Command::new(&py_bin);
-                cmd.arg(&script);
-                cmd.env("PYTHONUNBUFFERED", "1");
-                cmd.env("PYTHONIOENCODING", "utf-8");
-                cmd.env("SERVER_URL", server);
-                cmd.env("TWITCH_PROXY_PLAYLIST", proxy);
-                cmd.env("RECORDS_DIR", records);
-                cmd.env("STREAMLINK_PATH", streamlink);
+                let stop = Arc::new(AtomicBool::new(false));
+                *agent_stop_sig.lock().unwrap() = Some(stop.clone());
+                agent_running_flag.store(true, Ordering::Relaxed);
+
+                if let Some(ui) = handle_weak.upgrade() {
+                    ui.set_agent_active(true);
+                    ui.set_agent_status_text("🟢 Листенер активен".into());
+                }
 
                 let handle_for_line = handle_weak.clone();
                 let on_line = move |line: String| {
@@ -363,22 +359,34 @@ fn main() -> Result<(), slint::PlatformError> {
                 };
 
                 let handle_for_exit = handle_weak.clone();
-                let on_exit = move || {
-                    let h = handle_for_exit.clone();
+                let running_exit = agent_running_flag.clone();
+                let stop_exit = agent_stop_sig.clone();
+
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+
+                    rt.block_on(agent::run_pc_agent(
+                        server,
+                        proxy,
+                        records,
+                        streamlink,
+                        stop,
+                        on_line,
+                    ));
+
+                    running_exit.store(false, Ordering::Relaxed);
+                    *stop_exit.lock().unwrap() = None;
+
                     let _ = slint::invoke_from_event_loop(move || {
-                        if let Some(ui) = h.upgrade() {
+                        if let Some(ui) = handle_for_exit.upgrade() {
                             ui.set_agent_active(false);
                             ui.set_agent_status_text("Листенер остановлен".into());
                         }
                     });
-                };
-
-                if let Ok(_) = agent_proc.start(cmd, on_line, on_exit) {
-                    if let Some(ui) = handle_weak.upgrade() {
-                        ui.set_agent_active(true);
-                        ui.set_agent_status_text("🟢 Листенер активен".into());
-                    }
-                }
+                });
             }
         });
     }
@@ -415,17 +423,19 @@ fn main() -> Result<(), slint::PlatformError> {
     // Live Recording Start/Stop
     {
         let handle_weak = handle.clone();
-        let rec_proc = rec_process.clone();
+        let rec_running_flag = rec_running.clone();
+        let rec_stop_sig = rec_stop_signal.clone();
         let root = root_dir.clone();
         let cfg_arc = config_arc.clone();
         let refresh_fn = refresh_ui_records.clone();
 
         main_window.on_toggle_recording(move || {
-            if rec_proc.is_running() {
-                rec_proc.stop();
+            if rec_running_flag.load(Ordering::Relaxed) {
+                if let Some(stop) = rec_stop_sig.lock().unwrap().take() {
+                    stop.store(true, Ordering::Relaxed);
+                }
                 if let Some(ui) = handle_weak.upgrade() {
-                    ui.set_rec_active(false);
-                    ui.set_rec_status_text("Запись остановлена".into());
+                    ui.set_rec_status_text("Остановка записи...".into());
                 }
             } else {
                 let chan = if let Some(ui) = handle_weak.upgrade() {
@@ -434,40 +444,52 @@ fn main() -> Result<(), slint::PlatformError> {
                     String::new()
                 };
 
-                if chan.is_empty() {
+                if chan.trim().is_empty() {
                     if let Some(ui) = handle_weak.upgrade() {
                         ui.set_rec_status_text("Укажите канал Twitch!".into());
                     }
                     return;
                 }
 
-                let (py_bin, qual) = {
-                    let cfg = cfg_arc.lock().unwrap();
-                    let miniconda = PathBuf::from(r"C:\Users\User\miniconda3\python.exe");
-                    let py = if (cfg.python_path == "python" || cfg.python_path.is_empty())
-                        && miniconda.is_file()
-                    {
-                        miniconda.to_string_lossy().to_string()
-                    } else {
-                        cfg.python_path.clone()
-                    };
-                    let q = if let Some(ui) = handle_weak.upgrade() {
-                        ui.get_rec_quality().to_string()
-                    } else {
-                        "best".to_string()
-                    };
-                    (py, q)
+                let qual = if let Some(ui) = handle_weak.upgrade() {
+                    ui.get_rec_quality().to_string()
+                } else {
+                    "best".to_string()
                 };
 
-                let script = root.join("recorder.py");
-                let mut cmd = Command::new(&py_bin);
-                cmd.arg(&script);
-                cmd.arg(&chan);
-                cmd.arg("--quality");
-                cmd.arg(&qual);
-                cmd.current_dir(&root);
-                cmd.env("PYTHONUNBUFFERED", "1");
-                cmd.env("PYTHONIOENCODING", "utf-8");
+                let (records_dir, emote_cache_dir, streamlink_bin, proxy_playlist, twitch_client_id, twitch_app_token) = {
+                    let cfg = cfg_arc.lock().unwrap();
+                    (
+                        root.join(&cfg.records_dir),
+                        root.join(&cfg.emote_cache_dir),
+                        cfg.streamlink_path.clone(),
+                        cfg.twitch_proxy_playlist.clone(),
+                        cfg.twitch_client_id.clone(),
+                        cfg.twitch_app_token.clone(),
+                    )
+                };
+
+                let rec_config = recorder::RecorderConfig {
+                    channel: chan.clone(),
+                    quality: qual,
+                    records_dir,
+                    emote_cache_dir,
+                    streamlink_bin,
+                    proxy_playlist,
+                    twitch_client_id,
+                    twitch_app_token,
+                    reconnect_delay_sec: 5,
+                    offline_timeout_min: 10,
+                };
+
+                let stop = Arc::new(AtomicBool::new(false));
+                *rec_stop_sig.lock().unwrap() = Some(stop.clone());
+                rec_running_flag.store(true, Ordering::Relaxed);
+
+                if let Some(ui) = handle_weak.upgrade() {
+                    ui.set_rec_active(true);
+                    ui.set_rec_status_text(format!("Идет запись стрима #{}...", chan).into());
+                }
 
                 let handle_for_line = handle_weak.clone();
                 let on_line = move |line: String| {
@@ -483,25 +505,29 @@ fn main() -> Result<(), slint::PlatformError> {
                 };
 
                 let handle_for_exit = handle_weak.clone();
+                let running_exit = rec_running_flag.clone();
+                let stop_exit = rec_stop_sig.clone();
                 let refresh_on_exit = refresh_fn.clone();
-                let on_exit = move || {
-                    let h = handle_for_exit.clone();
-                    let rf = refresh_on_exit.clone();
+
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+
+                    rt.block_on(recorder::run_live_recorder(rec_config, stop, on_line));
+
+                    running_exit.store(false, Ordering::Relaxed);
+                    *stop_exit.lock().unwrap() = None;
+
                     let _ = slint::invoke_from_event_loop(move || {
-                        if let Some(ui) = h.upgrade() {
+                        if let Some(ui) = handle_for_exit.upgrade() {
                             ui.set_rec_active(false);
                             ui.set_rec_status_text("Запись завершена".into());
                         }
-                        rf();
+                        refresh_on_exit();
                     });
-                };
-
-                if let Ok(_) = rec_proc.start(cmd, on_line, on_exit) {
-                    if let Some(ui) = handle_weak.upgrade() {
-                        ui.set_rec_active(true);
-                        ui.set_rec_status_text(format!("Идет запись стрима #{}...", chan).into());
-                    }
-                }
+                });
             }
         });
     }

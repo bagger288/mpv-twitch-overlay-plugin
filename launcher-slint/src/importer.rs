@@ -81,7 +81,7 @@ fn decode_irc_tag_value(value: &str) -> String {
 }
 
 /// Parse a raw IRC string line
-fn parse_raw_irc(raw: &str) -> Option<ChatRecord> {
+pub fn parse_raw_irc(raw: &str) -> Option<ChatRecord> {
     let rest = raw.trim_end_matches(['\r', '\n']);
     let (tag_part, rest) = if rest.starts_with('@') {
         let (tags, rem) = rest[1..].split_once(' ')?;
