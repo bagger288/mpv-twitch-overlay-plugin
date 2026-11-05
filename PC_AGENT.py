@@ -129,7 +129,10 @@ def record_worker(login, stop_event, quality="best,audio_only"):
         if TWITCH_PROXY_PLAYLIST:
             cmd.append(f"--twitch-proxy-playlist={TWITCH_PROXY_PLAYLIST}")
         
-        popen_kwargs = {}
+        popen_kwargs = {
+            "stdout": sys.stdout,
+            "stderr": sys.stderr,
+        }
         if sys.platform == "win32":
             popen_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
 
