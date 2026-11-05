@@ -129,8 +129,12 @@ def record_worker(login, stop_event, quality="best,audio_only"):
         if TWITCH_PROXY_PLAYLIST:
             cmd.append(f"--twitch-proxy-playlist={TWITCH_PROXY_PLAYLIST}")
         
+        popen_kwargs = {}
+        if sys.platform == "win32":
+            popen_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+
         try:
-            process = subprocess.Popen(cmd)
+            process = subprocess.Popen(cmd, **popen_kwargs)
             ticks = 0
             while process.poll() is None:
                 if stop_event.is_set():
@@ -141,15 +145,31 @@ def record_worker(login, stop_event, quality="best,audio_only"):
                         process.kill()
                     return
                 
-                # Каждые 10 секунд проверяем, не подходит ли место к концу (просто предупреждаем, НЕ останавливая запись!)
                 ticks += 1
+
+                # Каждые 3 минуты (180 секунд) выводим текущий размер файла и длительность записи
+                if ticks % 180 == 0:
+                    if os.path.exists(filename):
+                        size_bytes = os.path.getsize(filename)
+                        if size_bytes < 1024 * 1024:
+                            size_str = f"{size_bytes / 1024:.1f} КБ"
+                        elif size_bytes < 1024 * 1024 * 1024:
+                            size_str = f"{size_bytes / (1024 * 1024):.1f} МБ"
+                        else:
+                            size_str = f"{size_bytes / (1024 * 1024 * 1024):.2f} ГБ"
+                        m, s = divmod(ticks, 60)
+                        h, m = divmod(m, 60)
+                        dur_str = f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
+                        print(f"[REC] {login}: записано {size_str} (длительность {dur_str})", flush=True)
+
+                # Каждые 10 секунд проверяем, не подходит ли место к концу (просто предупреждаем, НЕ останавливая запись!)
                 if ticks % 10 == 0:
                     free_gb = get_free_space_mb(RECORDS_DIR) / 1024.0
                     now = time.time()
                     if free_gb < WARN_FREE_GB and (now - last_warn_time > ALERT_COOLDOWN):
                         last_warn_time = now
                         msg = f"Идет запись ({login}), на диске осталось {free_gb:.2f} ГБ! Освободите место, чтобы стрим не прервался."
-                        print(f"\n[WARN] {msg}")
+                        print(f"\n[WARN] {msg}", flush=True)
                         notify_windows("[WARN] Скоро закончится место на диске!", msg, critical=False)
 
                 time.sleep(1)

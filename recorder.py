@@ -173,12 +173,17 @@ class TwitchRecorder:
             logger.info(f"Launching: {' '.join(cmd)}")
             try:
                 # Run streamlink in subprocess
+                popen_kwargs = {
+                    "stdout": subprocess.PIPE,
+                    "stderr": subprocess.STDOUT,
+                    "universal_newlines": True,
+                    "bufsize": 1,
+                }
+                if sys.platform == "win32":
+                    popen_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
                 self.current_proc = subprocess.Popen(
                     cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    universal_newlines=True,
-                    bufsize=1,
+                    **popen_kwargs,
                 )
             except FileNotFoundError:
                 logger.error(f"Streamlink executable '{self.streamlink_bin}' not found! Please check PATH or config.json.")

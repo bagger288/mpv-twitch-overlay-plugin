@@ -46,6 +46,12 @@ impl ManagedProcess {
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
 
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        }
+
         let mut child = cmd
             .spawn()
             .map_err(|e| format!("Не удалось запустить процесс: {}", e))?;
