@@ -1,17 +1,6 @@
-# Local documentation and development artifacts
-/docs/
+# Build artifacts and targets
 /target/
-/tools/
 /build/
-/tg_bot/
-/cut_plugin/
-
-# Python caches and local environments
-__pycache__/
-*.pyc
-*.pyo
-.venv/
-venv/
 
 # Local settings, credentials, logs, and recordings
 /config.json
@@ -34,6 +23,8 @@ venv/
 /twitch_chat.dll.lib
 /twitch_chat.exp
 /twitch_chat.dll.exp
+/twitch_launcher.exe
+/twitch_launcher.pdb
 
 # Fonts not embedded in the current plugin
 /assets/DejaVuSansMono.ttf
@@ -43,3 +34,6 @@ venv/
 /assets/Roobert-SemiBold.ttf
 /assets/inter-cyrillic.ttf
 /assets/inter-latin-700.ttf
+
+# Local development docs
+/docs/

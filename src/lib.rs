@@ -217,6 +217,7 @@ struct PluginState {
     current_time_pos: f64,
     current_path: String,
     explicit_session: Option<PathBuf>,
+    config_path: Option<PathBuf>,
     pending_search_seek: Option<f64>,
     vo_configured: bool,
     playback_active: bool,
@@ -245,6 +246,7 @@ impl PluginState {
             current_time_pos: 0.0,
             current_path: String::new(),
             explicit_session: None,
+            config_path: None,
             pending_search_seek: None,
             vo_configured: false,
             playback_active: false,
@@ -314,25 +316,168 @@ impl PluginState {
         }
     }
 
-    fn save_chat_settings(&self) {
+    fn resolve_config_path(&self) -> PathBuf {
+        if let Some(ref path) = self.config_path {
+            return path.clone();
+        }
+        // 1. Check current working directory
+        if let Ok(cwd) = std::env::current_dir() {
+            let p = cwd.join("config.json");
+            if p.is_file() {
+                return p;
+            }
+        }
+        // 2. Check relative to session directory
         if let Some(session) = &self.session {
-            let settings_path = session.session_dir.join("chat_settings.json");
-            let data = serde_json::json!({
-                "chat_x": self.ui.panel_x,
-                "chat_y": self.ui.panel_y,
-                "chat_width": self.ui.panel_width,
-                "chat_height": self.ui.panel_height,
-                "chat_font_size": self.ui.font_size,
-                "chat_bg_opacity": self.ui.bg_opacity,
-                "chat_enabled": self.ui.chat_enabled,
-                "emotes_enabled": self.ui.emotes_enabled,
-                "badges_enabled": self.ui.badges_enabled,
-                "chat_text_effect": self.ui.text_effect,
-                "chat_outline_width": self.ui.outline_width,
-                "chat_minimized_position": self.ui.minimized_position,
-            });
-            if let Ok(json_str) = serde_json::to_string_pretty(&data) {
-                let _ = std::fs::write(settings_path, json_str);
+            let p2 = session.session_dir.join("../../config.json");
+            if p2.is_file() {
+                return p2;
+            }
+            let p1 = session.session_dir.join("../config.json");
+            if p1.is_file() {
+                return p1;
+            }
+            let p0 = session.session_dir.join("config.json");
+            if p0.is_file() {
+                return p0;
+            }
+        }
+        // 3. Check relative to explicit_session
+        if let Some(ref es) = self.explicit_session {
+            let base = if es.is_dir() { es.clone() } else { es.parent().unwrap_or(es).to_path_buf() };
+            let p2 = base.join("../../config.json");
+            if p2.is_file() {
+                return p2;
+            }
+            let p1 = base.join("../config.json");
+            if p1.is_file() {
+                return p1;
+            }
+        }
+        // 4. If session is inside a "records" folder, assume its parent is the project root
+        if let Some(session) = &self.session {
+            if let Some(parent) = session.session_dir.parent() {
+                if parent.file_name().and_then(|n| n.to_str()) == Some("records") {
+                    if let Some(root) = parent.parent() {
+                        return root.join("config.json");
+                    }
+                }
+            }
+        }
+        // 5. Fallback to cwd
+        if let Ok(cwd) = std::env::current_dir() {
+            return cwd.join("config.json");
+        }
+        PathBuf::from("config.json")
+    }
+
+    fn apply_overlay_settings(&mut self, val: &serde_json::Value) {
+        if let Some(x) = val.get("chat_x").and_then(|v| v.as_i64()) {
+            self.ui.panel_x = x as i32;
+        }
+        if let Some(y) = val.get("chat_y").and_then(|v| v.as_i64()) {
+            self.ui.panel_y = y as i32;
+        }
+        if let Some(w) = val.get("chat_width").and_then(|v| v.as_u64()) {
+            self.ui.panel_width = w as u32;
+        }
+        if let Some(h) = val.get("chat_height").and_then(|v| v.as_u64()) {
+            self.ui.panel_height = h as u32;
+        }
+        if let Some(fs) = val.get("chat_font_size").and_then(|v| v.as_f64()) {
+            self.ui.font_size = fs as f32;
+        }
+        if let Some(op) = val.get("chat_bg_opacity").and_then(|v| v.as_f64()) {
+            self.ui.bg_opacity = op as f32;
+        }
+        if let Some(enabled) = val.get("chat_enabled").or_else(|| val.get("default_chat_enabled")).and_then(|v| v.as_bool()) {
+            self.ui.chat_enabled = enabled;
+        }
+        if let Some(enabled) = val.get("emotes_enabled").or_else(|| val.get("default_emotes_enabled")).and_then(|v| v.as_bool()) {
+            self.ui.emotes_enabled = enabled;
+        }
+        if let Some(enabled) = val.get("badges_enabled").and_then(|v| v.as_bool()) {
+            self.ui.badges_enabled = enabled;
+        }
+        if let Some(effect) = val.get("chat_text_effect").and_then(|v| v.as_str()).and_then(TextEffect::parse) {
+            self.ui.text_effect = effect;
+        }
+        if let Some(position) = val.get("chat_minimized_position").and_then(|v| v.as_array()) {
+            if let (Some(x), Some(y)) = (position.get(0).and_then(|v| v.as_i64()), position.get(1).and_then(|v| v.as_i64())) {
+                self.ui.minimized_position = Some((x as i32, y as i32));
+            }
+        }
+        if let Some(width) = val.get("chat_outline_width").and_then(|v| v.as_f64()) {
+            self.ui.outline_width = clamp_outline_width(width as f32);
+        }
+    }
+
+    fn load_chat_settings(&mut self) {
+        let config_path = self.resolve_config_path();
+        log_plugin(&format!("Loading chat overlay settings from global config: {:?}", config_path));
+
+        let mut loaded = false;
+        if config_path.is_file() {
+            if let Ok(content) = std::fs::read_to_string(&config_path) {
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
+                    if val.get("chat_x").is_some() || val.get("chat_width").is_some() || val.get("chat_font_size").is_some() || val.get("chat_enabled").is_some() {
+                        self.apply_overlay_settings(&val);
+                        loaded = true;
+                    }
+                }
+            }
+        }
+
+        // Migration: if global config did not have overlay settings yet, check if session has legacy chat_settings.json
+        if !loaded {
+            if let Some(session) = &self.session {
+                let legacy_settings = session.session_dir.join("chat_settings.json");
+                if legacy_settings.is_file() {
+                    if let Ok(content) = std::fs::read_to_string(&legacy_settings) {
+                        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
+                            log_plugin(&format!("Migrating legacy chat_settings.json from {:?} to global config", legacy_settings));
+                            self.apply_overlay_settings(&val);
+                            self.save_chat_settings();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn save_chat_settings(&self) {
+        let config_path = self.resolve_config_path();
+        log_plugin(&format!("Saving chat overlay settings to global config: {:?}", config_path));
+
+        let mut map: serde_json::Map<String, serde_json::Value> = if config_path.is_file() {
+            std::fs::read_to_string(&config_path)
+                .ok()
+                .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+                .and_then(|val| val.as_object().cloned())
+                .unwrap_or_default()
+        } else {
+            serde_json::Map::new()
+        };
+
+        map.insert("chat_x".to_string(), serde_json::json!(self.ui.panel_x));
+        map.insert("chat_y".to_string(), serde_json::json!(self.ui.panel_y));
+        map.insert("chat_width".to_string(), serde_json::json!(self.ui.panel_width));
+        map.insert("chat_height".to_string(), serde_json::json!(self.ui.panel_height));
+        map.insert("chat_font_size".to_string(), serde_json::json!(self.ui.font_size));
+        map.insert("chat_bg_opacity".to_string(), serde_json::json!(self.ui.bg_opacity));
+        map.insert("chat_enabled".to_string(), serde_json::json!(self.ui.chat_enabled));
+        map.insert("emotes_enabled".to_string(), serde_json::json!(self.ui.emotes_enabled));
+        map.insert("badges_enabled".to_string(), serde_json::json!(self.ui.badges_enabled));
+        map.insert("chat_text_effect".to_string(), serde_json::json!(self.ui.text_effect));
+        map.insert("chat_outline_width".to_string(), serde_json::json!(self.ui.outline_width));
+        map.insert("chat_minimized_position".to_string(), serde_json::json!(self.ui.minimized_position));
+
+        if let Ok(json_str) = serde_json::to_string_pretty(&serde_json::Value::Object(map)) {
+            let tmp_path = config_path.with_extension("json.tmp");
+            if std::fs::write(&tmp_path, &json_str).is_ok() {
+                let _ = std::fs::rename(&tmp_path, &config_path);
+            } else {
+                let _ = std::fs::write(&config_path, json_str);
             }
         }
     }
@@ -862,6 +1007,10 @@ impl PluginState {
                 let key = k.trim();
                 let val = v.trim();
                 match key {
+                    "twitch_config" | "config" => {
+                        log_plugin(&format!("twitch_config specified: {}", val));
+                        self.config_path = Some(PathBuf::from(val));
+                    }
                     "twitch_session" => {
                         log_plugin(&format!("twitch_session specified: {}", val));
                         self.explicit_session = Some(PathBuf::from(val));
@@ -946,46 +1095,7 @@ impl PluginState {
                 mgr.emotes_manifest.total_emotes_count(),
                 mgr.emotes_manifest.badges.len()
             ));
-            let settings_file = mgr.session_dir.join("chat_settings.json");
-            if let Ok(content) = std::fs::read_to_string(&settings_file) {
-                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
-                    if let Some(x) = val.get("chat_x").and_then(|v| v.as_i64()) {
-                        self.ui.panel_x = x as i32;
-                    }
-                    if let Some(y) = val.get("chat_y").and_then(|v| v.as_i64()) {
-                        self.ui.panel_y = y as i32;
-                    }
-                    if let Some(w) = val.get("chat_width").and_then(|v| v.as_u64()) {
-                        self.ui.panel_width = w as u32;
-                    }
-                    if let Some(h) = val.get("chat_height").and_then(|v| v.as_u64()) {
-                        self.ui.panel_height = h as u32;
-                    }
-                    if let Some(fs) = val.get("chat_font_size").and_then(|v| v.as_f64()) {
-                        self.ui.font_size = fs as f32;
-                    }
-                    if let Some(op) = val.get("chat_bg_opacity").and_then(|v| v.as_f64()) {
-                        self.ui.bg_opacity = op as f32;
-                    }
-                    if let Some(enabled) = val.get("emotes_enabled").and_then(|v| v.as_bool()) {
-                        self.ui.emotes_enabled = enabled;
-                    }
-                    if let Some(enabled) = val.get("badges_enabled").and_then(|v| v.as_bool()) {
-                        self.ui.badges_enabled = enabled;
-                    }
-                    if let Some(effect) = val.get("chat_text_effect").and_then(|v| v.as_str()).and_then(TextEffect::parse) {
-                        self.ui.text_effect = effect;
-                    }
-                    if let Some(position) = val.get("chat_minimized_position").and_then(|v| v.as_array()) {
-                        if let (Some(x), Some(y)) = (position.get(0).and_then(|v| v.as_i64()), position.get(1).and_then(|v| v.as_i64())) {
-                            self.ui.minimized_position = Some((x as i32, y as i32));
-                        }
-                    }
-                    if let Some(width) = val.get("chat_outline_width").and_then(|v| v.as_f64()) {
-                        self.ui.outline_width = clamp_outline_width(width as f32);
-                    }
-                }
-            }
+            self.load_chat_settings();
 
             let cache_directory = mgr.cache_directory();
             self.emotes = Some(EmoteCache::with_cache_dir(&mgr.session_dir, cache_directory.as_deref()));
@@ -1167,6 +1277,8 @@ pub unsafe extern "C" fn mpv_open_cplugin(ctx: MpvHandleRaw) -> c_int {
     if let Some(opts) = state.mpv.get_property_string("options/script-opts") {
         state.parse_script_opts(&opts);
     }
+
+    state.load_chat_settings();
 
     // Main event loop (runs in mpv's dedicated plugin thread)
     loop {
@@ -1415,4 +1527,66 @@ pub unsafe extern "C" fn mpv_open_cplugin(ctx: MpvHandleRaw) -> c_int {
         state.mpv.overlay_remove(OVERLAY_ID);
     }
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_global_config_overlay_settings() {
+        let temp_dir = std::env::temp_dir().join(format!("test_twitch_cfg_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let config_file = temp_dir.join("config.json");
+
+        // Pre-populate config.json with launcher settings
+        let initial_cfg = serde_json::json!({
+            "streamlink_path": "streamlink",
+            "mpv_path": "mpv",
+            "records_dir": "records",
+            "twitch_client_id": "test_client_id"
+        });
+        std::fs::write(&config_file, serde_json::to_string_pretty(&initial_cfg).unwrap()).unwrap();
+
+        let mut ui = UiState::default();
+        ui.panel_x = 500;
+        ui.panel_y = 120;
+        ui.panel_width = 400;
+        ui.panel_height = 700;
+        ui.font_size = 18.0;
+        ui.bg_opacity = 0.85;
+        ui.chat_enabled = true;
+        ui.emotes_enabled = false;
+        ui.badges_enabled = true;
+        ui.text_effect = TextEffect::Shadow;
+        ui.outline_width = 2.0;
+
+        let mut map: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&std::fs::read_to_string(&config_file).unwrap()).unwrap();
+        map.insert("chat_x".to_string(), serde_json::json!(ui.panel_x));
+        map.insert("chat_y".to_string(), serde_json::json!(ui.panel_y));
+        map.insert("chat_width".to_string(), serde_json::json!(ui.panel_width));
+        map.insert("chat_height".to_string(), serde_json::json!(ui.panel_height));
+        map.insert("chat_font_size".to_string(), serde_json::json!(ui.font_size));
+        map.insert("chat_bg_opacity".to_string(), serde_json::json!(ui.bg_opacity));
+        map.insert("chat_enabled".to_string(), serde_json::json!(ui.chat_enabled));
+        map.insert("emotes_enabled".to_string(), serde_json::json!(ui.emotes_enabled));
+        map.insert("badges_enabled".to_string(), serde_json::json!(ui.badges_enabled));
+        map.insert("chat_text_effect".to_string(), serde_json::json!(ui.text_effect));
+        map.insert("chat_outline_width".to_string(), serde_json::json!(ui.outline_width));
+        std::fs::write(&config_file, serde_json::to_string_pretty(&map).unwrap()).unwrap();
+
+        let saved_val: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&config_file).unwrap()).unwrap();
+        assert_eq!(saved_val["streamlink_path"], "streamlink");
+        assert_eq!(saved_val["twitch_client_id"], "test_client_id");
+        assert_eq!(saved_val["chat_x"], 500);
+        assert_eq!(saved_val["chat_y"], 120);
+        assert_eq!(saved_val["chat_width"], 400);
+        assert_eq!(saved_val["chat_height"], 700);
+        assert_eq!(saved_val["chat_font_size"], 18.0);
+        assert!((saved_val["chat_bg_opacity"].as_f64().unwrap() - 0.85).abs() < 1e-4);
+        assert_eq!(saved_val["emotes_enabled"], false);
+        assert_eq!(saved_val["chat_text_effect"], "shadow");
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
 }

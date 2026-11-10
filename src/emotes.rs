@@ -77,7 +77,41 @@ impl EmoteCache {
             if candidate.is_file() { return Some(candidate); }
         }
         let candidate = self.session_dir.join(path);
-        candidate.is_file().then_some(candidate)
+        if candidate.is_file() { return Some(candidate); }
+
+        // Fallback for badges: if looking for "badges/{set_id}_{version}.png",
+        // find matching file in cache, e.g. "*{set_id}_{version}-*.png"
+        if let Some(rel_str) = path.to_str() {
+            if rel_str.starts_with("badges/") || rel_str.starts_with("badges\\") {
+                let file_name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+                if !file_name.is_empty() {
+                    let needle = format!("_{}-", file_name);
+                    let exact_stem = format!("_{}.png", file_name);
+                    for directory in &self.cache_candidates {
+                        let badges_dir = directory.join("badges");
+                        if let Ok(entries) = std::fs::read_dir(&badges_dir) {
+                            let mut channel_match = None;
+                            let mut global_match = None;
+                            for entry in entries.flatten() {
+                                let name = entry.file_name().to_string_lossy().to_string();
+                                if name.ends_with(".png") && (name.contains(&needle) || name.ends_with(&exact_stem)) {
+                                    if name.starts_with("global_") {
+                                        global_match = Some(entry.path());
+                                    } else {
+                                        channel_match = Some(entry.path());
+                                    }
+                                }
+                            }
+                            if let Some(p) = channel_match.or(global_match) {
+                                return Some(p);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        None
     }
 
     pub fn preferred_path(&self, preview: &str, animation_path: Option<&str>) -> String {

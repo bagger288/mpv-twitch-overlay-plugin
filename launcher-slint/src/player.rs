@@ -29,33 +29,26 @@ pub fn launch_player(
         .as_ref()
         .unwrap_or(&session.dir);
 
-    let script_opts = format!("twitch_session={}", session_path.display());
+    let config_path = crate::config::get_config_path(project_root);
+    let script_opts = format!(
+        "twitch_session={},twitch_config={}",
+        session_path.display(),
+        config_path.display()
+    );
 
     let rust_dll_root = project_root.join("twitch_chat.dll");
+    let rust_dll_target = project_root.join("target").join("release").join("twitch_chat.dll");
     let rust_dll_build = project_root.join("build").join("twitch_chat.dll");
-    let lua_script = project_root.join("twitch_chat.lua");
     let lua_input_script = project_root.join("twitch_chat_input.lua");
 
-    let engine = config.chat_engine.to_lowercase();
-    let (chosen_script, is_rust) = if engine == "lua" {
-        (lua_script, false)
-    } else if engine == "rust" {
-        if rust_dll_root.is_file() {
-            (rust_dll_root, true)
-        } else if rust_dll_build.is_file() {
-            (rust_dll_build, true)
-        } else {
-            (lua_script, false)
-        }
+    let chosen_script = if rust_dll_root.is_file() {
+        rust_dll_root
+    } else if rust_dll_target.is_file() {
+        rust_dll_target
+    } else if rust_dll_build.is_file() {
+        rust_dll_build
     } else {
-        // Auto
-        if rust_dll_root.is_file() {
-            (rust_dll_root, true)
-        } else if rust_dll_build.is_file() {
-            (rust_dll_build, true)
-        } else {
-            (lua_script, false)
-        }
+        return Err("Файл twitch_chat.dll не найден! Соберите библиотеку: cargo build --release".to_string());
     };
 
     let mpv_log = project_root.join("mpv.log");
@@ -68,7 +61,7 @@ pub fn launch_player(
     cmd.arg("--keep-open=yes");
     cmd.arg(format!("--log-file={}", mpv_log.display()));
 
-    if is_rust && lua_input_script.is_file() {
+    if lua_input_script.is_file() {
         cmd.arg(format!("--script={}", lua_input_script.display()));
     }
 

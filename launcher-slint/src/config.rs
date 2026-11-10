@@ -49,6 +49,51 @@ pub struct AppConfig {
 
     #[serde(default)]
     pub twitch_token_expires_at: u64,
+
+    #[serde(default)]
+    pub window_x: Option<i32>,
+
+    #[serde(default)]
+    pub window_y: Option<i32>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_x: Option<i32>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_y: Option<i32>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_width: Option<u32>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_height: Option<u32>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_font_size: Option<f32>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_bg_opacity: Option<f32>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_enabled: Option<bool>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emotes_enabled: Option<bool>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub badges_enabled: Option<bool>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_text_effect: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_outline_width: Option<f32>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_minimized_position: Option<(i32, i32)>,
+
+    #[serde(default, flatten)]
+    pub extra: std::collections::HashMap<String, serde_json::Value>,
 }
 
 fn default_streamlink() -> String { "streamlink".to_string() }
@@ -76,6 +121,21 @@ impl Default for AppConfig {
             twitch_client_secret: String::new(),
             twitch_refresh_token: String::new(),
             twitch_token_expires_at: 0,
+            window_x: None,
+            window_y: None,
+            chat_x: None,
+            chat_y: None,
+            chat_width: None,
+            chat_height: None,
+            chat_font_size: None,
+            chat_bg_opacity: None,
+            chat_enabled: None,
+            emotes_enabled: None,
+            badges_enabled: None,
+            chat_text_effect: None,
+            chat_outline_width: None,
+            chat_minimized_position: None,
+            extra: std::collections::HashMap::new(),
         }
     }
 }
@@ -115,5 +175,47 @@ pub fn save_config(base_dir: &Path, config: &AppConfig) -> bool {
             false
         }
         Err(_) => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_app_config_preserves_overlay_settings() {
+        let temp_dir = std::env::temp_dir().join(format!("test_app_cfg_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let _ = fs::create_dir_all(&temp_dir);
+
+        let mut cfg = load_config(&temp_dir);
+        cfg.chat_x = Some(350);
+        cfg.chat_y = Some(80);
+        cfg.chat_width = Some(420);
+        cfg.chat_height = Some(650);
+        cfg.chat_font_size = Some(16.5);
+        cfg.chat_bg_opacity = Some(0.8);
+        cfg.chat_enabled = Some(true);
+        cfg.emotes_enabled = Some(true);
+        cfg.badges_enabled = Some(false);
+        cfg.chat_text_effect = Some("outline".to_string());
+        cfg.chat_outline_width = Some(2.5);
+        cfg.extra.insert("custom_property".to_string(), serde_json::json!("preserved_value"));
+
+        assert!(save_config(&temp_dir, &cfg));
+
+        let reloaded = load_config(&temp_dir);
+        assert_eq!(reloaded.chat_x, Some(350));
+        assert_eq!(reloaded.chat_y, Some(80));
+        assert_eq!(reloaded.chat_width, Some(420));
+        assert_eq!(reloaded.chat_height, Some(650));
+        assert_eq!(reloaded.chat_font_size, Some(16.5));
+        assert_eq!(reloaded.chat_bg_opacity, Some(0.8));
+        assert_eq!(reloaded.chat_enabled, Some(true));
+        assert_eq!(reloaded.badges_enabled, Some(false));
+        assert_eq!(reloaded.chat_text_effect.as_deref(), Some("outline"));
+        assert_eq!(reloaded.chat_outline_width, Some(2.5));
+        assert_eq!(reloaded.extra.get("custom_property"), Some(&serde_json::json!("preserved_value")));
+
+        let _ = fs::remove_dir_all(&temp_dir);
     }
 }

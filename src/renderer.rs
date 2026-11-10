@@ -45,6 +45,91 @@ impl ChatRenderer {
         }
     }
 
+    /// Renders a pure chat overlay frame for video clipping/exporting (with alpha channel)
+    pub fn render_clip_frame(
+        &self,
+        messages: &[LayoutMessage],
+        emotes: &EmoteCache,
+        ui: &UiState,
+        elapsed: Duration,
+    ) -> Option<Pixmap> {
+        let width = ui.panel_width;
+        let height = ui.panel_height;
+        if width == 0 || height == 0 {
+            return None;
+        }
+
+        let mut pixmap = Pixmap::new(width, height)?;
+
+        // Background panel with opacity
+        let opacity = ui.bg_opacity;
+        let bg_alpha = (opacity * 255.0).clamp(0.0, 255.0).round() as u8;
+        if bg_alpha > 0 {
+            let mut bg_paint = Paint::default();
+            bg_paint.set_color_rgba8(13, 14, 18, bg_alpha);
+            if let Some(rect) = Rect::from_xywh(0.0, 0.0, width as f32, height as f32) {
+                pixmap.fill_rect(rect, &bg_paint, Transform::identity(), None);
+            }
+        }
+
+        let total_h = messages.last().map(|m| m.bottom_y).unwrap_or(0.0);
+        let visible_top = 8.0f32;
+        let visible_bottom = (height as f32 - 8.0).max(visible_top);
+        let available = visible_bottom - visible_top;
+        let base_y = if total_h > available {
+            visible_bottom - total_h
+        } else {
+            visible_top
+        };
+
+        let mut mask = Mask::new(width, height)?;
+        let row_width = width as usize;
+        let top_row = (visible_top.ceil() as usize).min(height as usize);
+        let bottom_row = (visible_bottom.ceil() as usize).min(height as usize);
+        mask.data_mut()[top_row * row_width..bottom_row * row_width].fill(255);
+
+        for msg in messages {
+            let shifted_top = base_y + msg.top_y;
+            let shifted_bottom = base_y + msg.bottom_y;
+
+            if shifted_bottom < visible_top || shifted_top > visible_bottom {
+                continue;
+            }
+
+            for token in &msg.tokens {
+                match token {
+                    LayoutToken::Text { text, color, style, x, y } => {
+                        let render_y = base_y + y;
+                        if render_y + ui.font_size >= visible_top && render_y - ui.font_size * 2.0 <= visible_bottom {
+                            if let Some(bitmap) = self.rasterize_text(text, *x, render_y - ui.font_size, ui.font_size, *style) {
+                                bitmap.paint(&mut pixmap, *color, ui.text_effect, ui.outline_width, Some((visible_top, visible_bottom)));
+                            }
+                        }
+                    }
+                    LayoutToken::Image { path, x, y, width: _iw, height: ih } => {
+                        let render_y = base_y + y;
+                        if render_y + *ih as f32 >= visible_top && render_y <= visible_bottom {
+                            let emote_px = emotes.sample(path, *ih, elapsed).map(|s| s.pixmap)
+                                .or_else(|| emotes.get_or_load(path, *ih));
+                            if let Some(emote_px) = emote_px {
+                                pixmap.draw_pixmap(
+                                    *x as i32,
+                                    render_y as i32,
+                                    emote_px.as_ref().as_ref(),
+                                    &tiny_skia::PixmapPaint::default(),
+                                    Transform::identity(),
+                                    Some(&mask),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Some(pixmap)
+    }
+
     pub fn layouter(&self) -> &ChatLayouter {
         &self.layouter
     }

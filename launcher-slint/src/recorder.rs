@@ -1,19 +1,17 @@
 use chrono::{DateTime, Local, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use std::collections::HashMap;
-use std::fs::{self, OpenOptions};
-use std::io::{BufRead, BufReader, Write as IoWrite};
+use std::fs;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader as TokioBufReader};
-use tokio::net::TcpStream;
+use std::time::Duration;
 
 use crate::emotes;
-use crate::importer;
+
+pub static REC_ACTIVE_SESSION_DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
 
 #[derive(Debug, Clone)]
 pub struct RecorderConfig {
@@ -88,6 +86,8 @@ pub async fn run_live_recorder<F: Fn(String) + Send + Sync + Clone + 'static>(
         return;
     }
 
+    *REC_ACTIVE_SESSION_DIR.lock().unwrap() = Some(session_dir.clone());
+
     let session_file = session_dir.join(format!("{}.session.json", session_prefix));
     let chat_file = session_dir.join(format!("{}.chat.jsonl", session_prefix));
 
@@ -108,20 +108,18 @@ pub async fn run_live_recorder<F: Fn(String) + Send + Sync + Clone + 'static>(
     log_fn(format!(" [REC] Файл чата:           {}", chat_file.display()));
     log_fn("==================================================".to_string());
 
-    // 1. Launch Twitch IRC chat logger task
+    // 1. Launch Twitch IRC chat logger task (TLS 6697 with fallback)
     let chat_stop = stop_signal.clone();
     let chat_chan = channel.clone();
     let chat_file_clone = chat_file.clone();
     let session_file_for_chat = session_file.clone();
-    let manifest_for_chat = manifest_arc.clone();
     let log_fn_chat = log_fn.clone();
 
     let chat_handle = tokio::spawn(async move {
-        run_chat_logger(
+        crate::chat_logger::run_chat_logger(
             chat_chan,
             chat_file_clone,
-            session_file_for_chat,
-            manifest_for_chat,
+            Some(session_file_for_chat),
             chat_stop,
             log_fn_chat,
         )
@@ -228,9 +226,6 @@ pub async fn run_live_recorder<F: Fn(String) + Send + Sync + Clone + 'static>(
             });
         }
 
-        let mut ticks: u64 = 0;
-        let start_time = Instant::now();
-
         // Monitor streamlink execution
         loop {
             if stop_signal.load(Ordering::Relaxed) {
@@ -258,35 +253,6 @@ pub async fn run_live_recorder<F: Fn(String) + Send + Sync + Clone + 'static>(
             }
 
             tokio::time::sleep(Duration::from_secs(1)).await;
-            ticks += 1;
-
-            // Log size every 3 minutes (180 seconds)
-            if ticks % 180 == 0 {
-                if let Ok(meta) = fs::metadata(&part_path) {
-                    let bytes = meta.len();
-                    if bytes > 0 {
-                        let size_str = if bytes < 1024 * 1024 {
-                            format!("{:.1} КБ", bytes as f64 / 1024.0)
-                        } else if bytes < 1024 * 1024 * 1024 {
-                            format!("{:.1} МБ", bytes as f64 / (1024.0 * 1024.0))
-                        } else {
-                            format!("{:.2} ГБ", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
-                        };
-
-                        let elapsed = start_time.elapsed().as_secs();
-                        let h = elapsed / 3600;
-                        let m = (elapsed % 3600) / 60;
-                        let s = elapsed % 60;
-                        let dur_str = if h > 0 {
-                            format!("{:02}:{:02}:{:02}", h, m, s)
-                        } else {
-                            format!("{:02}:{:02}", m, s)
-                        };
-
-                        log_fn(format!("[REC] {}: записано {} (длительность {})", part_filename, size_str, dur_str));
-                    }
-                }
-            }
         }
 
         let end_ms = Utc::now().timestamp_millis();
@@ -365,8 +331,12 @@ pub async fn run_live_recorder<F: Fn(String) + Send + Sync + Clone + 'static>(
 
     let _ = chat_handle.await;
 
+    // Update message count in session.json
+    let msg_count = crate::chat_logger::count_chat_messages(&chat_file);
+    crate::chat_logger::update_session_message_count(&session_file, msg_count);
+
     // 4. Cache emotes and badges automatically
-    log_fn("[REC] Запись завершена. Загрузка и кэширование эмоутов...".to_string());
+    log_fn(format!("[REC] Запись завершена. Записано сообщений чата: {}. Загрузка и кэширование эмоутов...", msg_count));
     let room_id_opt = {
         let lock = manifest_arc.lock().unwrap();
         lock.room_id.clone()
@@ -395,129 +365,6 @@ pub async fn run_live_recorder<F: Fn(String) + Send + Sync + Clone + 'static>(
     )
     .await;
 
+    *REC_ACTIVE_SESSION_DIR.lock().unwrap() = None;
     log_fn(format!("[REC] Сессия успешно сохранена в {}", session_dir.display()));
-}
-
-async fn run_chat_logger<F: Fn(String) + Send + Sync + Clone + 'static>(
-    channel: String,
-    chat_file: PathBuf,
-    session_file: PathBuf,
-    manifest: Arc<Mutex<SessionManifest>>,
-    stop_signal: Arc<AtomicBool>,
-    log_fn: F,
-) {
-    let mut last_disconnect_time: Option<Instant> = None;
-
-    while !stop_signal.load(Ordering::Relaxed) {
-        log_fn(format!("[IRC] Подключение к irc.chat.twitch.tv:6667 (канал #{})", channel));
-
-        let stream = match tokio::time::timeout(Duration::from_secs(10), TcpStream::connect("irc.chat.twitch.tv:6667")).await {
-            Ok(Ok(s)) => s,
-            Ok(Err(e)) => {
-                log_fn(format!("[IRC] Ошибка подключения: {}. Повтор через 5с...", e));
-                tokio::time::sleep(Duration::from_secs(5)).await;
-                continue;
-            }
-            Err(_) => {
-                log_fn("[IRC] Таймаут подключения к Twitch IRC. Повтор через 5с...".to_string());
-                tokio::time::sleep(Duration::from_secs(5)).await;
-                continue;
-            }
-        };
-
-        if let Some(disc) = last_disconnect_time.take() {
-            let duration_ms = disc.elapsed().as_millis() as i64;
-            if duration_ms > 2000 {
-                let gap_entry = json!({
-                    "type": "GAP",
-                    "recv": Utc::now().timestamp_millis(),
-                    "duration_ms": duration_ms
-                });
-                if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(&chat_file) {
-                    let _ = writeln!(f, "{}", gap_entry);
-                }
-            }
-        }
-
-        let (reader, mut writer) = stream.into_split();
-        let mut lines = TokioBufReader::new(reader).lines();
-
-        let nick_num = (Utc::now().timestamp_millis() % 90000 + 10000).to_string();
-        let handshake = format!(
-            "CAP REQ :twitch.tv/tags twitch.tv/commands\r\nPASS SCHMOOPIIE\r\nNICK justinfan{}\r\nJOIN #{}\r\n",
-            nick_num, channel
-        );
-
-        if let Err(e) = writer.write_all(handshake.as_bytes()).await {
-            log_fn(format!("[IRC] Ошибка отправки хендшейка: {}", e));
-            continue;
-        }
-        let _ = writer.flush().await;
-
-        log_fn(format!("[IRC] Подключено к чату #{}. Запись сообщений...", channel));
-
-        let mut file_opt = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&chat_file)
-            .ok();
-
-        while !stop_signal.load(Ordering::Relaxed) {
-            let line_res = tokio::time::timeout(Duration::from_secs(45), lines.next_line()).await;
-
-            let line = match line_res {
-                Ok(Ok(Some(l))) => l,
-                Ok(Ok(None)) => {
-                    log_fn("[IRC] Соединение закрыто сервером.".to_string());
-                    break;
-                }
-                Ok(Err(e)) => {
-                    log_fn(format!("[IRC] Ошибка чтения сокета: {}", e));
-                    break;
-                }
-                Err(_) => {
-                    // Send PING to verify connection
-                    if writer.write_all(b"PING :tmi.twitch.tv\r\n").await.is_err() {
-                        log_fn("[IRC] Соединение зависло, переподключение...".to_string());
-                        break;
-                    }
-                    let _ = writer.flush().await;
-                    continue;
-                }
-            };
-
-            let trimmed = line.trim_end_matches(['\r', '\n']);
-            if trimmed.starts_with("PING ") {
-                let pong = format!("PONG {}\r\n", &trimmed[5..]);
-                let _ = writer.write_all(pong.as_bytes()).await;
-                let _ = writer.flush().await;
-                continue;
-            }
-
-            if let Some(record) = importer::parse_raw_irc(trimmed) {
-                // If room_id discovered, save into session manifest
-                if !record.room_id.is_empty() {
-                    let mut lock = manifest.lock().unwrap();
-                    if lock.room_id.as_deref().unwrap_or("").is_empty() {
-                        lock.room_id = Some(record.room_id.clone());
-                        save_session(&session_file, &lock);
-                        log_fn(format!("[IRC] Обнаружен room_id: {}", record.room_id));
-                    }
-                }
-
-                if let Some(f) = file_opt.as_mut() {
-                    if let Ok(json_str) = serde_json::to_string(&record) {
-                        let _ = writeln!(f, "{}", json_str);
-                    }
-                }
-            }
-        }
-
-        last_disconnect_time = Some(Instant::now());
-        if !stop_signal.load(Ordering::Relaxed) {
-            tokio::time::sleep(Duration::from_secs(3)).await;
-        }
-    }
-
-    log_fn("[IRC] Логгер чата остановлен.".to_string());
 }

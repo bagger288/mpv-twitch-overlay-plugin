@@ -125,7 +125,7 @@ pub fn parse_raw_irc(raw: &str) -> Option<ChatRecord> {
         }
     }
     if ts == 0 {
-        return None;
+        ts = chrono::Utc::now().timestamp_millis();
     }
 
     let display = tags_map.get("display-name").cloned().unwrap_or_default();
@@ -259,14 +259,15 @@ fn normalize_message_item(val: &Value) -> Option<ChatRecord> {
                     None
                 }
             })
-            .or_else(|| obj.get("channel").and_then(|c| c.as_str()).map(|s| s.to_string()))
-            .unwrap_or_else(|| {
+            .or_else(|| {
                 if !display.is_empty() {
-                    display.to_lowercase()
+                    Some(display.to_lowercase())
                 } else {
-                    "user".to_string()
+                    None
                 }
-            });
+            })
+            .or_else(|| obj.get("channel").and_then(|c| c.as_str()).map(|s| s.to_string()))
+            .unwrap_or_else(|| "user".to_string());
 
         let display_final = if display.is_empty() { user.clone() } else { display };
 
@@ -398,8 +399,13 @@ fn detect_stream_start_ms(messages: &[ChatRecord], target_date: Option<NaiveDate
 
         let mut unique_users = HashSet::new();
         for m in &window {
-            if !m.user.is_empty() && m.user != "user" {
-                unique_users.insert(&m.user);
+            let u = if !m.display.is_empty() {
+                m.display.to_lowercase()
+            } else {
+                m.user.to_lowercase()
+            };
+            if !u.is_empty() && u != "user" {
+                unique_users.insert(u);
             }
         }
 
@@ -480,6 +486,8 @@ pub async fn fetch_day_log(
 
     let res = client
         .get(&url)
+        .header("Cache-Control", "no-cache")
+        .header("Pragma", "no-cache")
         .send()
         .await
         .map_err(|e| format!("Сетевая ошибка при запросе {}: {}", url, e))?;
@@ -582,7 +590,7 @@ pub async fn run_import_task<F: Fn(String) + Send + 'static>(
 
     // Determine session start
     let target_date = params.dates.first().copied();
-    let (session_start_ms, detection_info) = if let Some(st) = params.start_dt {
+    let (mut session_start_ms, mut detection_info) = if let Some(st) = params.start_dt {
         (st.timestamp_millis(), "Указано ручное время старта".to_string())
     } else if params.auto_detect {
         detect_stream_start_ms(&all_messages, target_date)
@@ -590,40 +598,108 @@ pub async fn run_import_task<F: Fn(String) + Send + 'static>(
         (all_messages[0].ts, "Первое сообщение архива".to_string())
     };
 
-    log_fn(format!("[Старт] {}", detection_info));
-
     let session_start_dt = DateTime::from_timestamp_millis(session_start_ms)
         .unwrap_or_else(Utc::now);
 
-    let folder_name = format!(
-        "{}_{}",
-        channel,
-        session_start_dt.format("%d-%m-%Y_%H-%M-%S")
-    );
-    let session_dir = params.records_dir.join(&folder_name);
+    // If video files are provided and located inside a session subfolder, reuse that folder directly!
+    let (session_dir, folder_name) = if let Some(first_video) = params.video_paths.first() {
+        let parent = first_video.parent();
+        let is_in_subfolder = match parent {
+            Some(p) => {
+                let p_canon = p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+                let rec_canon = params.records_dir.canonicalize().unwrap_or_else(|_| params.records_dir.clone());
+                if p_canon == rec_canon {
+                    false
+                } else if let Some(name_os) = p.file_name() {
+                    let name = name_os.to_string_lossy().to_string();
+                    let (_, dt) = crate::records::parse_channel_from_folder(&name);
+                    let has_session = p.join(format!("{}.session.json", name)).is_file();
+                    dt.is_some() || has_session
+                } else {
+                    false
+                }
+            }
+            None => false,
+        };
+
+        if is_in_subfolder {
+            let parent_dir = parent.unwrap().to_path_buf();
+            let name = parent_dir.file_name().unwrap().to_string_lossy().to_string();
+            log_fn(format!("Используется существующая папка видео: {}", parent_dir.display()));
+            (parent_dir, name)
+        } else {
+            let fname = format!("{}_{}", channel, session_start_dt.format("%d-%m-%Y_%H-%M-%S"));
+            (params.records_dir.join(&fname), fname)
+        }
+    } else {
+        let fname = format!("{}_{}", channel, session_start_dt.format("%d-%m-%Y_%H-%M-%S"));
+        (params.records_dir.join(&fname), fname)
+    };
+
     fs::create_dir_all(&session_dir)
         .map_err(|e| format!("Не удалось создать директорию сессии {}: {}", session_dir.display(), e))?;
 
     let session_file = session_dir.join(format!("{}.session.json", folder_name));
     let chat_file = session_dir.join(format!("{}.chat.jsonl", folder_name));
 
+    // If user did not specify start_dt and auto_detect is false, check if existing session.json has start time
+    if params.start_dt.is_none() && !params.auto_detect && session_file.is_file() {
+        if let Ok(content) = fs::read_to_string(&session_file) {
+            if let Ok(val) = serde_json::from_str::<Value>(&content) {
+                if let Some(ms) = val.get("session_start_ms").and_then(|v| v.as_i64()) {
+                    session_start_ms = ms;
+                    detection_info = "Время старта из существующей сессии".to_string();
+                }
+            }
+        }
+    }
+
+    log_fn(format!("[Старт] {}", detection_info));
+
     // Probe video parts
     let mut parts_json = Vec::new();
     let mut offsets_map = serde_json::Map::new();
+
+    // Preserve existing offsets_ms if session.json already exists
+    if session_file.is_file() {
+        if let Ok(content) = fs::read_to_string(&session_file) {
+            if let Ok(val) = serde_json::from_str::<Value>(&content) {
+                if let Some(existing_offsets) = val.get("offsets_ms").and_then(|v| v.as_object()) {
+                    offsets_map = existing_offsets.clone();
+                }
+            }
+        }
+    }
+
     let mut cursor = session_start_ms;
-    let mut total_video_duration_ms = 0i64;
-    let mut has_video_durations = false;
+    let mut _total_video_duration_ms = 0i64;
+    let mut _has_video_durations = false;
 
     if !params.video_paths.is_empty() {
         log_fn(format!("Анализ видеофайлов ({}) с помощью ffprobe...", params.video_paths.len()));
         for (i, vp) in params.video_paths.iter().enumerate() {
             let canonical = vp.canonicalize().unwrap_or_else(|_| vp.clone());
-            let file_str = canonical.to_string_lossy().to_string();
+            let file_str = if let Ok(rel) = vp.strip_prefix(&session_dir) {
+                rel.to_string_lossy().replace('\\', "/")
+            } else if let Ok(canon_vp) = vp.canonicalize() {
+                if let Ok(canon_sess) = session_dir.canonicalize() {
+                    if let Ok(rel) = canon_vp.strip_prefix(&canon_sess) {
+                        rel.to_string_lossy().replace('\\', "/")
+                    } else {
+                        canonical.to_string_lossy().to_string()
+                    }
+                } else {
+                    canonical.to_string_lossy().to_string()
+                }
+            } else {
+                vp.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| canonical.to_string_lossy().to_string())
+            };
+
             let duration = probe_video_duration_ms(&canonical);
 
             let end_ms = if let Some(dur) = duration {
-                total_video_duration_ms += dur;
-                has_video_durations = true;
+                _total_video_duration_ms += dur;
+                _has_video_durations = true;
                 log_fn(format!(
                     "  [Видео {}] {} -> длительность {:.1} с",
                     i + 1,
@@ -646,7 +722,7 @@ pub async fn run_import_task<F: Fn(String) + Send + 'static>(
                 "end_ms": end_ms,
             }));
 
-            offsets_map.insert(file_str, json!(0));
+            offsets_map.entry(file_str).or_insert(json!(0));
 
             if let Some(end) = end_ms {
                 cursor = end;
@@ -654,18 +730,14 @@ pub async fn run_import_task<F: Fn(String) + Send + 'static>(
         }
     }
 
-    // Clip chat to video duration if known
-    if has_video_durations && total_video_duration_ms > 0 {
-        let clip_start = session_start_ms;
-        let clip_end = cursor;
-        let before_count = all_messages.len();
-        all_messages.retain(|m| m.ts >= clip_start && m.ts < clip_end);
-        log_fn(format!(
-            "Чат синхронизирован с видео: оставлено {} сообщений из {} (от старта до окончания видео)",
-            all_messages.len(),
-            before_count
-        ));
-    }
+    // Ensure messages are sorted by timestamp
+    all_messages.sort_by_key(|m| m.ts);
+    log_fn(format!(
+        "Собрано {} сообщений чата (период с {} по {})",
+        all_messages.len(),
+        all_messages.first().and_then(|m| DateTime::from_timestamp_millis(m.ts)).map(|d| d.format("%Y-%m-%d %H:%M:%S UTC").to_string()).unwrap_or_default(),
+        all_messages.last().and_then(|m| DateTime::from_timestamp_millis(m.ts)).map(|d| d.format("%Y-%m-%d %H:%M:%S UTC").to_string()).unwrap_or_default(),
+    ));
 
     // Write chat.jsonl
     log_fn(format!("Запись {} сообщений в {}...", all_messages.len(), chat_file.file_name().unwrap().to_string_lossy()));

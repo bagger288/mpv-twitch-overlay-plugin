@@ -1,5 +1,6 @@
 use chrono::Local;
 use serde::Deserialize;
+use serde_json::json;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -11,6 +12,9 @@ use std::time::{Duration, Instant};
 const WARN_FREE_GB: f64 = 3.0;
 const FULL_DISK_MB: u64 = 150;
 const ALERT_COOLDOWN_SECS: u64 = 300; // 5 minutes
+
+pub static AGENT_ACTIVE_SESSION_DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
+pub static AGENT_RECORDING: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct StreamerEntry {
@@ -123,6 +127,9 @@ pub async fn run_pc_agent<F: Fn(String) + Send + Sync + Clone + 'static>(
     proxy_playlist: String,
     records_dir: PathBuf,
     streamlink_bin: String,
+    emote_cache_dir: PathBuf,
+    twitch_client_id: Option<String>,
+    twitch_app_token: Option<String>,
     stop_signal: Arc<AtomicBool>,
     log_fn: F,
 ) {
@@ -201,6 +208,9 @@ pub async fn run_pc_agent<F: Fn(String) + Send + Sync + Clone + 'static>(
                                 let rec_dir_clone = records_dir.clone();
                                 let sl_bin_clone = streamlink_bin.clone();
                                 let proxy_clone = proxy_playlist.clone();
+                                let cache_dir_clone = emote_cache_dir.clone();
+                                let cid_clone = twitch_client_id.clone();
+                                let tok_clone = twitch_app_token.clone();
                                 let log_fn_worker = log_fn.clone();
                                 let last_warn_worker = last_warn_time.clone();
                                 let last_full_worker = last_full_time.clone();
@@ -212,6 +222,9 @@ pub async fn run_pc_agent<F: Fn(String) + Send + Sync + Clone + 'static>(
                                         rec_dir_clone,
                                         sl_bin_clone,
                                         proxy_clone,
+                                        cache_dir_clone,
+                                        cid_clone,
+                                        tok_clone,
                                         stop_flag,
                                         child_arc,
                                         log_fn_worker,
@@ -294,15 +307,68 @@ fn run_worker_thread<F: Fn(String) + Send + Sync + Clone + 'static>(
     records_dir: PathBuf,
     streamlink_bin: String,
     proxy_playlist: String,
+    emote_cache_dir: PathBuf,
+    twitch_client_id: Option<String>,
+    twitch_app_token: Option<String>,
     stop_flag: Arc<AtomicBool>,
     child_arc: Arc<Mutex<Option<Child>>>,
     log_fn: F,
     last_warn_time: Arc<Mutex<Instant>>,
     last_full_time: Arc<Mutex<Instant>>,
 ) {
+    let session_start_dt = Local::now();
+    let session_folder = format!("{}_{}", login, session_start_dt.format("%d-%m-%Y_%H-%M-%S"));
+    let session_dir = records_dir.join(&session_folder);
+    if let Err(e) = fs::create_dir_all(&session_dir) {
+        log_fn(format!("[ERROR] Не удалось создать папку записи {}: {}", session_dir.display(), e));
+        return;
+    }
+
+    *AGENT_ACTIVE_SESSION_DIR.lock().unwrap() = Some(session_dir.clone());
+    AGENT_RECORDING.store(true, Ordering::SeqCst);
+
+    let session_file = session_dir.join(format!("{}.session.json", session_folder));
+    let chat_file = session_dir.join(format!("{}.chat.jsonl", session_folder));
+    let manifest = json!({
+        "channel": login,
+        "room_id": null,
+        "session_start_ms": session_start_dt.timestamp_millis(),
+        "start_time_iso": session_start_dt.to_rfc3339(),
+        "parts": [],
+        "offsets_ms": {},
+        "created_at": chrono::Utc::now().to_rfc3339(),
+    });
+    if let Ok(manifest_str) = serde_json::to_string_pretty(&manifest) {
+        let _ = fs::write(&session_file, manifest_str);
+    }
+
+    log_fn(format!("[REC] Папка записи стрима {}: {}", login, session_dir.display()));
+
+    // Launch background Twitch IRC chat logger (TLS on 6697 with fallback)
+    let chat_stop = Arc::new(AtomicBool::new(false));
+    let chat_stop_for_thread = chat_stop.clone();
+    let chat_chan = login.clone();
+    let chat_file_clone = chat_file.clone();
+    let session_file_clone = session_file.clone();
+    let log_fn_chat = log_fn.clone();
+
+    let chat_handle = std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(crate::chat_logger::run_chat_logger(
+            chat_chan,
+            chat_file_clone,
+            Some(session_file_clone),
+            chat_stop_for_thread,
+            log_fn_chat,
+        ));
+    });
+
     while !stop_flag.load(Ordering::Relaxed) {
-        let _ = fs::create_dir_all(&records_dir);
-        let free_mb = get_free_disk_space_mb(&records_dir);
+        let _ = fs::create_dir_all(&session_dir);
+        let free_mb = get_free_disk_space_mb(&session_dir);
 
         if free_mb < FULL_DISK_MB {
             let mut lft = last_full_time.lock().unwrap();
@@ -326,7 +392,8 @@ fn run_worker_thread<F: Fn(String) + Send + Sync + Clone + 'static>(
 
         let timestamp = Local::now().format("%d-%m-%Y_%H-%M-%S").to_string();
         let filename = format!("{}_{}.ts", login, timestamp);
-        let file_path = records_dir.join(&filename);
+        let file_path = session_dir.join(&filename);
+        let part_start_ms = chrono::Utc::now().timestamp_millis();
 
         log_fn(format!(
             "\n[REC] Подключение к twitch.tv/{} (качество: {})...",
@@ -338,6 +405,7 @@ fn run_worker_thread<F: Fn(String) + Send + Sync + Clone + 'static>(
         cmd.arg(&quality);
         cmd.arg("-o");
         cmd.arg(&file_path);
+        cmd.arg("--force");
         cmd.arg("--twitch-disable-ads");
         cmd.arg("--retry-streams");
         cmd.arg("5");
@@ -403,7 +471,6 @@ fn run_worker_thread<F: Fn(String) + Send + Sync + Clone + 'static>(
         }
 
         let mut ticks: u64 = 0;
-        let start_time = Instant::now();
 
         // Monitor child execution
         loop {
@@ -434,37 +501,9 @@ fn run_worker_thread<F: Fn(String) + Send + Sync + Clone + 'static>(
             std::thread::sleep(Duration::from_secs(1));
             ticks += 1;
 
-            // Log size every 3 minutes (180 seconds)
-            if ticks % 180 == 0 {
-                if let Ok(meta) = fs::metadata(&file_path) {
-                    let bytes = meta.len();
-                    if bytes > 0 {
-                        let size_str = if bytes < 1024 * 1024 {
-                            format!("{:.1} КБ", bytes as f64 / 1024.0)
-                        } else if bytes < 1024 * 1024 * 1024 {
-                            format!("{:.1} МБ", bytes as f64 / (1024.0 * 1024.0))
-                        } else {
-                            format!("{:.2} ГБ", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
-                        };
-
-                        let elapsed = start_time.elapsed().as_secs();
-                        let h = elapsed / 3600;
-                        let m = (elapsed % 3600) / 60;
-                        let s = elapsed % 60;
-                        let dur_str = if h > 0 {
-                            format!("{:02}:{:02}:{:02}", h, m, s)
-                        } else {
-                            format!("{:02}:{:02}", m, s)
-                        };
-
-                        log_fn(format!("[REC] {}: записано {} (длительность {})", login, size_str, dur_str));
-                    }
-                }
-            }
-
             // Low disk space check every 10 seconds
             if ticks % 10 == 0 {
-                let free_gb = get_free_disk_space_mb(&records_dir) as f64 / 1024.0;
+                let free_gb = get_free_disk_space_mb(&session_dir) as f64 / 1024.0;
                 if free_gb < WARN_FREE_GB {
                     let mut lwt = last_warn_time.lock().unwrap();
                     if lwt.elapsed() > Duration::from_secs(ALERT_COOLDOWN_SECS) {
@@ -480,16 +519,35 @@ fn run_worker_thread<F: Fn(String) + Send + Sync + Clone + 'static>(
             }
         }
 
-        // Clean up after streamlink finished
+        // Clean up after streamlink finished and update session manifest
         if let Ok(meta) = fs::metadata(&file_path) {
             if meta.len() > 0 {
+                let part_end_ms = chrono::Utc::now().timestamp_millis();
                 log_fn(format!("[OK] [FINISHED] Запись для {} сохранена: {}", login, filename));
+
+                if let Ok(content) = fs::read_to_string(&session_file) {
+                    if let Ok(mut val) = serde_json::from_str::<serde_json::Value>(&content) {
+                        if let Some(parts) = val.get_mut("parts").and_then(|p| p.as_array_mut()) {
+                            parts.push(json!({
+                                "file": filename,
+                                "start_ms": part_start_ms,
+                                "end_ms": part_end_ms,
+                            }));
+                        }
+                        if let Some(offsets) = val.get_mut("offsets_ms").and_then(|o| o.as_object_mut()) {
+                            offsets.entry(&filename).or_insert(json!(0));
+                        }
+                        if let Ok(updated_str) = serde_json::to_string_pretty(&val) {
+                            let _ = fs::write(&session_file, updated_str);
+                        }
+                    }
+                }
             } else {
                 let _ = fs::remove_file(&file_path);
             }
         }
 
-        let free_mb_after = get_free_disk_space_mb(&records_dir);
+        let free_mb_after = get_free_disk_space_mb(&session_dir);
         if free_mb_after < FULL_DISK_MB {
             let mut lft = last_full_time.lock().unwrap();
             *lft = Instant::now();
@@ -510,4 +568,50 @@ fn run_worker_thread<F: Fn(String) + Send + Sync + Clone + 'static>(
             std::thread::sleep(Duration::from_millis(500));
         }
     }
+
+    // Stop background chat logger
+    chat_stop.store(true, Ordering::Relaxed);
+    let _ = chat_handle.join();
+
+    // Check if any video was saved
+    let has_videos = if let Ok(entries) = fs::read_dir(&session_dir) {
+        entries.flatten().any(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            (name.ends_with(".ts") || name.ends_with(".mp4") || name.ends_with(".mkv"))
+                && e.metadata().map(|m| m.len() > 0).unwrap_or(false)
+        })
+    } else {
+        false
+    };
+
+    if has_videos {
+        let msg_count = crate::chat_logger::count_chat_messages(&chat_file);
+        crate::chat_logger::update_session_message_count(&session_file, msg_count);
+        log_fn(format!("[OK] Сессия для {} сохранена ({} сообщений чата). Кэширование эмоутов...", login, msg_count));
+
+        let room_id_opt = fs::read_to_string(&session_file).ok().and_then(|c| {
+            serde_json::from_str::<serde_json::Value>(&c).ok().and_then(|v| {
+                v.get("room_id").and_then(|r| r.as_str()).map(|s| s.to_string())
+            })
+        });
+
+        if let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() {
+            let _ = rt.block_on(crate::emotes::ensure_session_emotes(
+                &session_file,
+                &login,
+                room_id_opt.as_deref(),
+                twitch_client_id.as_deref(),
+                twitch_app_token.as_deref(),
+                &emote_cache_dir,
+                log_fn.clone(),
+            ));
+        }
+        log_fn(format!("[REC] Сессия для {} полностью готова в {}", login, session_dir.display()));
+    } else {
+        let _ = fs::remove_file(&session_file);
+        let _ = fs::remove_file(&chat_file);
+        let _ = fs::remove_dir(&session_dir);
+    }
+    *AGENT_ACTIVE_SESSION_DIR.lock().unwrap() = None;
+    AGENT_RECORDING.store(false, Ordering::SeqCst);
 }

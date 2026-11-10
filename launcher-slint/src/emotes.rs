@@ -484,7 +484,43 @@ pub async fn ensure_session_emotes<F: Fn(String) + Send + Sync + 'static>(
         }
 
         // Twitch Badges
-        let badges = fetch_badges(&client, effective_room_id, client_id, token, &log_fn).await;
+        let mut badges = fetch_badges(&client, effective_room_id, client_id, token, &log_fn).await;
+
+        // Fallback: If badges failed to fetch from Twitch API (e.g. expired token or offline),
+        // inherit badges from existing session files in records if available
+        if badges.is_empty() {
+            if let Some(parent) = session_dir.parent() {
+                if let Ok(entries) = fs::read_dir(parent) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.is_dir() {
+                            if let Ok(files) = fs::read_dir(&path) {
+                                for f in files.flatten() {
+                                    let name = f.file_name().to_string_lossy().to_string();
+                                    if name.ends_with(".emotes.json") || name == "emotes.json" {
+                                        if let Ok(content) = fs::read_to_string(f.path()) {
+                                            if let Ok(prev_snap) = serde_json::from_str::<EmoteSnapshot>(&content) {
+                                                if !prev_snap.badges.is_empty() {
+                                                    log_fn(format!(
+                                                        "[Badges] Восстановлено {} значков из существующей сессии",
+                                                        prev_snap.badges.len()
+                                                    ));
+                                                    badges = prev_snap.badges;
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            if !badges.is_empty() {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         let snap = EmoteSnapshot {
             channel: channel.to_string(),

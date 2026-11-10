@@ -1,4 +1,4 @@
-import { Button, ScrollView, LineEdit, CheckBox, ComboBox } from "std-widgets.slint";
+import { Button, ScrollView, CheckBox, ComboBox, Palette } from "std-widgets.slint";
 
 export struct RecordingItem {
     id: string,
@@ -15,8 +15,65 @@ export struct ChannelItem {
     count: int,
 }
 
+component AppInput inherits Rectangle {
+    in-out property <string> text <=> input.text;
+    in property <string> placeholder-text: "";
+    in property <InputType> input-type: InputType.text;
+    in property <bool> enabled: true;
+    in property <bool> read-only: false;
+    out property <bool> has-focus: input.has-focus;
+    property <bool> show-password: false;
+
+    forward-focus: input;
+    height: 32px;
+    background: input.has-focus ? #2d2d35 : #26262c;
+    border-radius: 4px;
+    border-width: 1px;
+    border-color: input.has-focus ? #9146ff : #3b3b44;
+    clip: true;
+
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 6px;
+
+        input := TextInput {
+            single-line: true;
+            vertical-alignment: center;
+            font-size: 10pt;
+            color: #efeff1;
+            selection-background-color: #9146ff;
+            selection-foreground-color: #ffffff;
+            input-type: (root.input-type == InputType.password && !root.show-password) ? InputType.password : InputType.text;
+            enabled: root.enabled;
+            read-only: root.read-only;
+        }
+
+        if root.input-type == InputType.password && root.text != "": TouchArea {
+            width: 24px;
+            mouse-cursor: pointer;
+            clicked => { root.show-password = !root.show-password; }
+            Text {
+                text: root.show-password ? "👁" : "🔒";
+                font-size: 10pt;
+                vertical-alignment: center;
+                horizontal-alignment: center;
+            }
+        }
+    }
+
+    if root.text == "" && !input.has-focus: Text {
+        x: 10px;
+        y: (parent.height - self.height) / 2;
+        text: root.placeholder-text;
+        font-size: 10pt;
+        color: #71717a;
+    }
+}
+
 export component MainWindow inherits Window {
     title: "Twitch recorder";
+    icon: @image-url("assets/app.png");
     min-width: 560px;
     min-height: 640px;
     preferred-width: 680px;
@@ -38,6 +95,10 @@ export component MainWindow inherits Window {
     // State properties
     in-out property <int> active_tab: 0;
 
+    init => {
+        Palette.color-scheme = ColorScheme.dark;
+    }
+
     // Callbacks
     callback select_tab(int);
     callback refresh_records();
@@ -56,6 +117,7 @@ export component MainWindow inherits Window {
 
     callback refresh_token_manually();
     callback save_settings();
+    callback check_tool_paths();
 
     // Data models
     in property <[ChannelItem]> channels: [];
@@ -78,11 +140,18 @@ export component MainWindow inherits Window {
     in property <bool> rec_active: false;
     in property <string> rec_status_text: "Готов к записи";
     in property <string> rec_console_text: "";
+    in property <string> rec_duration_text: "00:00:00";
+    in property <string> rec_size_text: "0 MB";
+    in property <string> rec_messages_text: "0 сообщ.";
 
     // Tab 4 PC Agent properties
     in property <bool> agent_active: false;
     in property <string> agent_status_text: "Листенер остановлен";
     in property <string> agent_console_text: "";
+    in property <bool> agent_recording_now: false;
+    in property <string> agent_duration_text: "00:00:00";
+    in property <string> agent_size_text: "0 MB";
+    in property <string> agent_messages_text: "0 сообщ.";
 
     // Tab 5 Settings properties
     in-out property <string> cfg_streamlink: "streamlink";
@@ -96,6 +165,12 @@ export component MainWindow inherits Window {
     in-out property <string> cfg_server_url: "";
     in-out property <string> cfg_proxy_playlist: "";
     in-out property <string> cfg_engine: "Auto";
+    in property <string> status_streamlink: "";
+    in property <bool> valid_streamlink: false;
+    in property <string> status_mpv: "";
+    in property <bool> valid_mpv: false;
+    in property <string> status_ffmpeg: "";
+    in property <bool> valid_ffmpeg: false;
 
     VerticalLayout {
         padding: 12px;
@@ -306,17 +381,17 @@ export component MainWindow inherits Window {
 
                 Text { text: "Импорт чата для существующих видео"; font-size: 11pt; font-weight: 700; color: root.c_title; }
                 Text { text: "Канал Twitch:"; font-size: 9pt; color: root.c_text_dim; }
-                LineEdit { text <=> root.imp_channel; }
+                AppInput { text <=> root.imp_channel; }
 
                 Text { text: "Видео:"; font-size: 9pt; color: root.c_text_dim; }
                 HorizontalLayout {
                     spacing: 6px;
-                    LineEdit { text <=> root.imp_video; placeholder-text: "Пути к файлам video.ts / mp4 через ';'"; }
+                    AppInput { text <=> root.imp_video; placeholder-text: "Пути к файлам video.ts / mp4 через ';'"; }
                     Button { text: "Обзор…"; clicked => { root.browse_import_video(); } }
                 }
 
                 Text { text: "Старт (UTC): YYYY-MM-DD HH:MM:SS"; font-size: 9pt; color: root.c_text_dim; }
-                LineEdit { text <=> root.imp_time; }
+                AppInput { text <=> root.imp_time; }
 
                 HorizontalLayout {
                     spacing: 8px;
@@ -356,7 +431,7 @@ export component MainWindow inherits Window {
                 }
 
                 Text { text: "Даты архива (UTC): YYYY-MM-DD, …"; font-size: 9pt; color: root.c_text_dim; }
-                LineEdit { text <=> root.imp_dates; }
+                AppInput { text <=> root.imp_dates; }
 
                 HorizontalLayout {
                     Button {
@@ -393,7 +468,7 @@ export component MainWindow inherits Window {
 
                 Text { text: "Запись стрима и чата"; font-size: 11pt; font-weight: 700; color: root.c_title; }
                 Text { text: "Канал Twitch:"; font-size: 9pt; color: root.c_text_dim; }
-                LineEdit { text <=> root.rec_channel; }
+                AppInput { text <=> root.rec_channel; }
 
                 Text { text: "Качество:"; font-size: 9pt; color: root.c_text_dim; }
                 HorizontalLayout {
@@ -415,6 +490,36 @@ export component MainWindow inherits Window {
                 }
 
                 Text { text: root.rec_status_text; color: root.c_text_dim; font-size: 9.5pt; }
+
+                if root.rec_active: Rectangle {
+                    height: 38px;
+                    background: #1c1f26;
+                    border-radius: 4px;
+                    border-width: 1px;
+                    border-color: #2e3440;
+                    HorizontalLayout {
+                        padding-left: 12px;
+                        padding-right: 12px;
+                        spacing: 16px;
+
+                        HorizontalLayout {
+                            spacing: 6px;
+                            Text { text: "⏱ Время:"; color: root.c_text_dim; font-size: 9pt; vertical-alignment: center; }
+                            Text { text: root.rec_duration_text; color: #ffffff; font-weight: 700; font-size: 9.5pt; vertical-alignment: center; }
+                        }
+                        HorizontalLayout {
+                            spacing: 6px;
+                            Text { text: "💾 Размер:"; color: root.c_text_dim; font-size: 9pt; vertical-alignment: center; }
+                            Text { text: root.rec_size_text; color: #64b5f6; font-weight: 700; font-size: 9.5pt; vertical-alignment: center; }
+                        }
+                        HorizontalLayout {
+                            spacing: 6px;
+                            Text { text: "💬 Чат:"; color: root.c_text_dim; font-size: 9pt; vertical-alignment: center; }
+                            Text { text: root.rec_messages_text; color: #81c784; font-weight: 700; font-size: 9.5pt; vertical-alignment: center; }
+                        }
+                        Rectangle { }
+                    }
+                }
 
                 // Recorder console
                 Rectangle {
@@ -463,6 +568,36 @@ export component MainWindow inherits Window {
                     font-weight: 700;
                 }
 
+                if root.agent_recording_now: Rectangle {
+                    height: 38px;
+                    background: #1c1f26;
+                    border-radius: 4px;
+                    border-width: 1px;
+                    border-color: #2e3440;
+                    HorizontalLayout {
+                        padding-left: 12px;
+                        padding-right: 12px;
+                        spacing: 16px;
+
+                        HorizontalLayout {
+                            spacing: 6px;
+                            Text { text: "⏱ Время:"; color: root.c_text_dim; font-size: 9pt; vertical-alignment: center; }
+                            Text { text: root.agent_duration_text; color: #ffffff; font-weight: 700; font-size: 9.5pt; vertical-alignment: center; }
+                        }
+                        HorizontalLayout {
+                            spacing: 6px;
+                            Text { text: "💾 Размер:"; color: root.c_text_dim; font-size: 9pt; vertical-alignment: center; }
+                            Text { text: root.agent_size_text; color: #64b5f6; font-weight: 700; font-size: 9.5pt; vertical-alignment: center; }
+                        }
+                        HorizontalLayout {
+                            spacing: 6px;
+                            Text { text: "💬 Чат:"; color: root.c_text_dim; font-size: 9pt; vertical-alignment: center; }
+                            Text { text: root.agent_messages_text; color: #81c784; font-weight: 700; font-size: 9.5pt; vertical-alignment: center; }
+                        }
+                        Rectangle { }
+                    }
+                }
+
                 // Console
                 Rectangle {
                     background: #141417;
@@ -494,22 +629,50 @@ export component MainWindow inherits Window {
                         Text { text: "Настройки путей и Twitch API"; font-size: 11pt; font-weight: 700; color: root.c_title; }
 
                         Text { text: "Путь к Streamlink:"; font-size: 9pt; color: root.c_text_dim; }
-                        LineEdit { text <=> root.cfg_streamlink; }
+                        AppInput { text <=> root.cfg_streamlink; }
+                        if root.status_streamlink != "": Text {
+                            text: root.status_streamlink;
+                            color: root.valid_streamlink ? #00e676 : #ff5252;
+                            font-size: 8.5pt;
+                            font-weight: 700;
+                        }
 
                         Text { text: "Путь к mpv:"; font-size: 9pt; color: root.c_text_dim; }
-                        LineEdit { text <=> root.cfg_mpv; }
+                        AppInput { text <=> root.cfg_mpv; }
+                        if root.status_mpv != "": Text {
+                            text: root.status_mpv;
+                            color: root.valid_mpv ? #00e676 : #ff5252;
+                            font-size: 8.5pt;
+                            font-weight: 700;
+                        }
+
+                        Text { text: "Статус FFmpeg (для экспорта клипов):"; font-size: 9pt; color: root.c_text_dim; }
+                        if root.status_ffmpeg != "": Text {
+                            text: root.status_ffmpeg;
+                            color: root.valid_ffmpeg ? #00e676 : #ffb300;
+                            font-size: 8.5pt;
+                            font-weight: 700;
+                        }
+
+                        HorizontalLayout {
+                            Button {
+                                text: "🔍 Проверить утилиты";
+                                clicked => { root.check_tool_paths(); }
+                            }
+                            Rectangle { }
+                        }
 
                         Text { text: "Twitch Client ID:"; font-size: 9pt; color: root.c_text_dim; }
-                        LineEdit { text <=> root.cfg_client_id; }
+                        AppInput { text <=> root.cfg_client_id; }
 
                         Text { text: "Twitch App/User Token:"; font-size: 9pt; color: root.c_text_dim; }
-                        LineEdit { text <=> root.cfg_app_token; input-type: password; }
+                        AppInput { text <=> root.cfg_app_token; input-type: InputType.password; }
 
                         Text { text: "Twitch Client Secret:"; font-size: 9pt; color: root.c_text_dim; }
-                        LineEdit { text <=> root.cfg_client_secret; input-type: password; }
+                        AppInput { text <=> root.cfg_client_secret; input-type: InputType.password; }
 
                         Text { text: "Twitch Refresh Token:"; font-size: 9pt; color: root.c_text_dim; }
-                        LineEdit { text <=> root.cfg_refresh_token; input-type: password; }
+                        AppInput { text <=> root.cfg_refresh_token; input-type: InputType.password; }
 
                         HorizontalLayout {
                             spacing: 8px;
@@ -519,22 +682,17 @@ export component MainWindow inherits Window {
                         }
 
                         Text { text: "Папка records:"; font-size: 9pt; color: root.c_text_dim; }
-                        LineEdit { text <=> root.cfg_records_dir; }
+                        AppInput { text <=> root.cfg_records_dir; }
 
                         Text { text: "SERVER_URL (сервер мониторинга):"; font-size: 9pt; color: root.c_text_dim; }
-                        LineEdit { text <=> root.cfg_server_url; placeholder-text: "https://your-bot-server.com"; }
+                        AppInput { text <=> root.cfg_server_url; placeholder-text: "https://your-bot-server.com"; }
 
                         Text { text: "Twitch Proxy Playlist (--twitch-proxy-playlist):"; font-size: 9pt; color: root.c_text_dim; }
-                        LineEdit { text <=> root.cfg_proxy_playlist; placeholder-text: "прокси через запятую"; }
+                        AppInput { text <=> root.cfg_proxy_playlist; placeholder-text: "прокси через запятую"; }
 
                         HorizontalLayout {
                             spacing: 8px;
-                            Text { text: "Движок чата: " + root.cfg_engine; color: root.c_text; vertical-alignment: center; }
-                            Button { text: "Переключить (Auto/Rust/Lua)"; clicked => {
-                                if root.cfg_engine == "Auto" { root.cfg_engine = "Rust"; }
-                                else if root.cfg_engine == "Rust" { root.cfg_engine = "Lua"; }
-                                else { root.cfg_engine = "Auto"; }
-                            } }
+                            Text { text: "Движок чата: Rust (twitch_chat.dll)"; color: #a3be8c; font-weight: 700; font-size: 9pt; vertical-alignment: center; }
                             Rectangle { }
                         }
 
@@ -551,4 +709,34 @@ export component MainWindow inherits Window {
             }
         }
     }
+}
+
+export component LauncherTray inherits SystemTrayIcon {
+    in-out property <string> tray_tooltip: "Twitch recorder";
+    in-out property <string> status_text: "Готов к работе";
+
+    icon: @image-url("assets/app.png");
+    tooltip: root.tray_tooltip;
+
+    clicked => {
+        root.toggle_window();
+    }
+
+    Menu {
+        MenuItem {
+            title: "Показать / Скрыть окно";
+            activated => { root.toggle_window(); }
+        }
+        MenuItem {
+            title: root.status_text;
+            enabled: false;
+        }
+        MenuItem {
+            title: "Выход";
+            activated => { root.quit_app(); }
+        }
+    }
+
+    callback toggle_window();
+    callback quit_app();
 }

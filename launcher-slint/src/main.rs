@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod agent;
+mod chat_logger;
 mod config;
 mod emotes;
 mod importer;
@@ -8,7 +9,9 @@ mod player;
 mod process_manager;
 mod recorder;
 mod records;
+mod render_chat;
 mod twitch_auth;
+mod win_dark_mode;
 
 slint::include_modules!();
 
@@ -20,6 +23,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 fn get_project_root() -> PathBuf {
     // 1. Check if current working directory has config.json or records
@@ -52,12 +56,177 @@ fn get_project_root() -> PathBuf {
     PathBuf::from(".")
 }
 
+fn format_bytes(bytes: u64) -> String {
+    if bytes < 1024 * 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else if bytes < 1024 * 1024 * 1024 {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else {
+        format!("{:.2} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+    }
+}
+
+fn calc_directory_size(dir: &Path) -> u64 {
+    let mut total_bytes = 0u64;
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            // Using std::fs::metadata(entry.path()) bypasses Windows NTFS FindFirstFile
+            // directory entry cache and queries the authoritative live file record.
+            if let Ok(meta) = std::fs::metadata(entry.path()) {
+                total_bytes += meta.len();
+            }
+        }
+    }
+    total_bytes
+}
+
+fn check_tool_paths(ui: &MainWindow, sl_path: &str, mpv_path: &str) {
+    // 1. Streamlink
+    let p_sl = Path::new(sl_path);
+    let bin_sl = if p_sl.is_file() { sl_path } else if sl_path.trim().is_empty() { "streamlink" } else { sl_path };
+    let mut cmd_sl = std::process::Command::new(bin_sl);
+    cmd_sl.arg("--version");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd_sl.creation_flags(0x08000000);
+    }
+    match cmd_sl.output() {
+        Ok(out) if out.status.success() => {
+            let ver = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            ui.set_valid_streamlink(true);
+            ui.set_status_streamlink(format!("✓ Streamlink доступен ({ver})").into());
+        }
+        _ => {
+            if p_sl.is_file() {
+                ui.set_valid_streamlink(true);
+                ui.set_status_streamlink("✓ Файл Streamlink существует".into());
+            } else {
+                ui.set_valid_streamlink(false);
+                ui.set_status_streamlink("✗ Streamlink не найден по указанному пути".into());
+            }
+        }
+    }
+
+    // 2. mpv
+    let p_mpv = Path::new(mpv_path);
+    let bin_mpv = if p_mpv.is_file() { mpv_path } else if mpv_path.trim().is_empty() { "mpv" } else { mpv_path };
+    let mut cmd_mpv = std::process::Command::new(bin_mpv);
+    cmd_mpv.arg("--version");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd_mpv.creation_flags(0x08000000);
+    }
+    match cmd_mpv.output() {
+        Ok(out) if out.status.success() => {
+            let ver = String::from_utf8_lossy(&out.stdout);
+            let first_line = ver.lines().next().unwrap_or("mpv").trim();
+            ui.set_valid_mpv(true);
+            ui.set_status_mpv(format!("✓ mpv доступен ({first_line})").into());
+        }
+        _ => {
+            if p_mpv.is_file() {
+                ui.set_valid_mpv(true);
+                ui.set_status_mpv("✓ Файл mpv существует".into());
+            } else {
+                ui.set_valid_mpv(false);
+                ui.set_status_mpv("✗ mpv не найден по указанному пути".into());
+            }
+        }
+    }
+
+    // 3. FFmpeg
+    let mut cmd_ff = std::process::Command::new("ffmpeg");
+    cmd_ff.arg("-version");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd_ff.creation_flags(0x08000000);
+    }
+    match cmd_ff.output() {
+        Ok(out) if out.status.success() => {
+            let mut nv_cmd = std::process::Command::new("ffmpeg");
+            nv_cmd.args(["-y", "-f", "lavfi", "-i", "color=c=black:s=256x256:d=0.1", "-c:v", "h264_nvenc", "-f", "null", "-"]);
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                nv_cmd.creation_flags(0x08000000);
+            }
+            if let Ok(nv_out) = nv_cmd.output() {
+                if nv_out.status.success() {
+                    ui.set_valid_ffmpeg(true);
+                    ui.set_status_ffmpeg("✓ FFmpeg доступен (Аппаратное ускорение NVENC активно)".into());
+                    return;
+                }
+            }
+            ui.set_valid_ffmpeg(true);
+            ui.set_status_ffmpeg("✓ FFmpeg доступен (Стандартное кодирование CPU)".into());
+        }
+        _ => {
+            ui.set_valid_ffmpeg(false);
+            ui.set_status_ffmpeg("✗ FFmpeg не найден в PATH (нужен для экспорта клипов)".into());
+        }
+    }
+}
+
 fn main() -> Result<(), slint::PlatformError> {
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "render-chat") {
+        #[cfg(windows)]
+        unsafe {
+            extern "system" {
+                fn AttachConsole(dwProcessId: u32) -> i32;
+            }
+            AttachConsole(0xFFFFFFFF);
+        }
+        let render_args: Vec<String> = args
+            .into_iter()
+            .skip_while(|a| a != "render-chat")
+            .skip(1)
+            .collect();
+        if let Err(e) = render_chat::run_render_chat(&render_args) {
+            let _ = std::fs::write("render_chat_err.log", format!("Error: {}\n", e));
+            eprintln!("Error rendering chat: {}", e);
+            std::process::exit(1);
+        }
+        std::process::exit(0);
+    }
+
     let main_window = MainWindow::new()?;
     let handle = main_window.as_weak();
 
+    let tray = LauncherTray::new()?;
+    let is_visible = Arc::new(AtomicBool::new(true));
+
     let root_dir = get_project_root();
     let config_arc = Arc::new(Mutex::new(load_config(&root_dir)));
+
+    // Restore window position or center on screen
+    {
+        let cfg = config_arc.lock().unwrap();
+        if let (Some(x), Some(y)) = (cfg.window_x, cfg.window_y) {
+            if x > -10000 && y >= 0 {
+                main_window.window().set_position(slint::PhysicalPosition::new(x, y));
+            }
+        } else {
+            #[cfg(windows)]
+            unsafe {
+                extern "system" {
+                    fn GetSystemMetrics(nIndex: i32) -> i32;
+                }
+                let screen_w = GetSystemMetrics(0); // SM_CXSCREEN
+                let screen_h = GetSystemMetrics(1); // SM_CYSCREEN
+                if screen_w > 0 && screen_h > 0 {
+                    let win_w = 680;
+                    let win_h = 780;
+                    let cx = (screen_w - win_w) / 2;
+                    let cy = (screen_h - win_h) / 2;
+                    main_window.window().set_position(slint::PhysicalPosition::new(cx.max(0), cy.max(0)));
+                }
+            }
+        }
+    }
     let sessions_cache: Arc<Mutex<HashMap<String, Vec<SessionInfo>>>> =
         Arc::new(Mutex::new(HashMap::new()));
 
@@ -80,6 +249,52 @@ fn main() -> Result<(), slint::PlatformError> {
         main_window.set_cfg_server_url(cfg.server_url.clone().into());
         main_window.set_cfg_proxy_playlist(cfg.twitch_proxy_playlist.clone().into());
         main_window.set_cfg_engine(cfg.chat_engine.clone().into());
+        check_tool_paths(&main_window, &cfg.streamlink_path, &cfg.mpv_path);
+    }
+
+    {
+        let handle_check = handle.clone();
+        main_window.on_check_tool_paths(move || {
+            if let Some(ui) = handle_check.upgrade() {
+                let sl = ui.get_cfg_streamlink().to_string();
+                let mpv = ui.get_cfg_mpv().to_string();
+                check_tool_paths(&ui, &sl, &mpv);
+            }
+        });
+    }
+
+    {
+        let handle_tray = handle.clone();
+        let is_vis_tray = is_visible.clone();
+        tray.on_toggle_window(move || {
+            if let Some(ui) = handle_tray.upgrade() {
+                let cur = is_vis_tray.load(Ordering::SeqCst);
+                if cur {
+                    let _ = ui.window().hide();
+                    is_vis_tray.store(false, Ordering::SeqCst);
+                } else {
+                    let _ = ui.window().show();
+                    is_vis_tray.store(true, Ordering::SeqCst);
+                    win_dark_mode::apply_dark_titlebar();
+                }
+            }
+        });
+
+        let handle_quit = handle.clone();
+        let cfg_quit = config_arc.clone();
+        let root_quit = root_dir.clone();
+        tray.on_quit_app(move || {
+            if let Some(ui) = handle_quit.upgrade() {
+                let pos = ui.window().position();
+                if pos.x > -10000 && pos.y >= 0 {
+                    let mut cfg = cfg_quit.lock().unwrap();
+                    cfg.window_x = Some(pos.x);
+                    cfg.window_y = Some(pos.y);
+                    save_config(&root_quit, &cfg);
+                }
+            }
+            std::process::exit(0);
+        });
     }
 
     // Helper: Refresh records list
@@ -302,6 +517,10 @@ fn main() -> Result<(), slint::PlatformError> {
 
                 save_config(&root, &cfg);
                 drop(cfg);
+
+                let sl = ui.get_cfg_streamlink().to_string();
+                let mpv = ui.get_cfg_mpv().to_string();
+                check_tool_paths(&ui, &sl, &mpv);
                 refresh_fn();
             }
         });
@@ -324,13 +543,16 @@ fn main() -> Result<(), slint::PlatformError> {
                     ui.set_agent_status_text("Остановка листенера...".into());
                 }
             } else {
-                let (server, proxy, records, streamlink) = {
+                let (server, proxy, records, streamlink, emote_cache, client_id, app_token) = {
                     let cfg = cfg_arc.lock().unwrap();
                     (
                         cfg.server_url.clone(),
                         cfg.twitch_proxy_playlist.clone(),
                         root.join(&cfg.records_dir),
                         cfg.streamlink_path.clone(),
+                        root.join(&cfg.emote_cache_dir),
+                        if cfg.twitch_client_id.trim().is_empty() { None } else { Some(cfg.twitch_client_id.clone()) },
+                        if cfg.twitch_app_token.trim().is_empty() { None } else { Some(cfg.twitch_app_token.clone()) },
                     )
                 };
 
@@ -371,6 +593,9 @@ fn main() -> Result<(), slint::PlatformError> {
                         proxy,
                         records,
                         streamlink,
+                        emote_cache,
+                        client_id,
+                        app_token,
                         stop,
                         on_line,
                     ));
@@ -408,11 +633,22 @@ fn main() -> Result<(), slint::PlatformError> {
                 .pick_files()
             {
                 let path_strs: Vec<String> = files
-                    .into_iter()
+                    .iter()
                     .map(|p| p.to_string_lossy().to_string())
                     .collect();
                 if let Some(ui) = handle_weak.upgrade() {
                     ui.set_imp_video(path_strs.join(";").into());
+
+                    // Auto-fill channel (nickname) and date from the chosen file
+                    if let Some(first) = files.first() {
+                        let (ch_opt, dt_opt) = records::detect_channel_and_date(first);
+                        if let Some(ch) = ch_opt {
+                            ui.set_imp_channel(ch.into());
+                        }
+                        if let Some(dt) = dt_opt {
+                            ui.set_imp_dates(dt.format("%Y-%m-%d").to_string().into());
+                        }
+                    }
                 }
             }
         });
@@ -593,7 +829,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let refresh_fn = refresh_ui_records.clone();
 
         main_window.on_run_import(move || {
-            let (ch, video_str, dates_str, time_str, auto_detect) = if let Some(ui) = handle_weak.upgrade() {
+            let (mut ch, video_str, dates_str, time_str, auto_detect) = if let Some(ui) = handle_weak.upgrade() {
                 (
                     ui.get_imp_channel().to_string(),
                     ui.get_imp_video().to_string(),
@@ -604,6 +840,24 @@ fn main() -> Result<(), slint::PlatformError> {
             } else {
                 return;
             };
+
+            let video_paths: Vec<PathBuf> = video_str
+                .split(';')
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| PathBuf::from(s.trim()))
+                .collect();
+
+            if ch.is_empty() {
+                if let Some(first) = video_paths.first() {
+                    let (detected_ch, _) = records::detect_channel_and_date(first);
+                    if let Some(c) = detected_ch {
+                        ch = c;
+                        if let Some(ui) = handle_weak.upgrade() {
+                            ui.set_imp_channel(ch.clone().into());
+                        }
+                    }
+                }
+            }
 
             if ch.is_empty() {
                 if let Some(ui) = handle_weak.upgrade() {
@@ -616,12 +870,6 @@ fn main() -> Result<(), slint::PlatformError> {
                 let cfg = cfg_arc.lock().unwrap();
                 root.join(&cfg.records_dir)
             };
-
-            let video_paths: Vec<PathBuf> = video_str
-                .split(';')
-                .filter(|s| !s.trim().is_empty())
-                .map(|s| PathBuf::from(s.trim()))
-                .collect();
 
             let mut parsed_dates = Vec::new();
             for part in dates_str.split(',') {
@@ -707,16 +955,39 @@ fn main() -> Result<(), slint::PlatformError> {
                                 let sp_clone = session_path.clone();
                                 let cr_clone = cache_root.clone();
                                 let rf_clone = rf.clone();
-                                let (cid_clone, tok_clone) = {
-                                    let cfg = cfg_arc_thread.lock().unwrap();
-                                    (cfg.twitch_client_id.clone(), cfg.twitch_app_token.clone())
-                                };
+                                let root_for_emotes = root_thread.clone();
+                                let cfg_for_emotes = cfg_arc_thread.clone();
 
                                 std::thread::spawn(move || {
                                     let rt2 = tokio::runtime::Builder::new_current_thread()
                                         .enable_all()
                                         .build()
                                         .unwrap();
+
+                                    let (cid_clone, tok_clone) = {
+                                        let mut cfg = cfg_for_emotes.lock().unwrap();
+                                        let now = chrono::Utc::now().timestamp().max(0) as u64;
+                                        if (cfg.twitch_token_expires_at > 0 && now >= cfg.twitch_token_expires_at.saturating_sub(300))
+                                            || cfg.twitch_app_token.is_empty()
+                                        {
+                                            if !cfg.twitch_client_id.is_empty()
+                                                && !cfg.twitch_client_secret.is_empty()
+                                                && !cfg.twitch_refresh_token.is_empty()
+                                            {
+                                                if let Ok(token_info) = rt2.block_on(twitch_auth::refresh_twitch_token(
+                                                    &cfg.twitch_client_id,
+                                                    &cfg.twitch_client_secret,
+                                                    &cfg.twitch_refresh_token,
+                                                )) {
+                                                    cfg.twitch_app_token = token_info.access_token.clone();
+                                                    cfg.twitch_refresh_token = token_info.refresh_token.clone();
+                                                    cfg.twitch_token_expires_at = now + token_info.expires_in as u64;
+                                                    save_config(&root_for_emotes, &cfg);
+                                                }
+                                            }
+                                        }
+                                        (cfg.twitch_client_id.clone(), cfg.twitch_app_token.clone())
+                                    };
 
                                     let log_cb2 = move |msg: String| {
                                         let h_inner = h2.clone();
@@ -757,5 +1028,127 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
 
+    {
+        let handle_for_close = handle.clone();
+        let cfg_arc_close = config_arc.clone();
+        let root_close = root_dir.clone();
+        let is_vis_close = is_visible.clone();
+        main_window.window().on_close_requested(move || {
+            if let Some(ui) = handle_for_close.upgrade() {
+                let pos = ui.window().position();
+                if pos.x > -10000 && pos.y >= 0 {
+                    let mut cfg = cfg_arc_close.lock().unwrap();
+                    cfg.window_x = Some(pos.x);
+                    cfg.window_y = Some(pos.y);
+                    save_config(&root_close, &cfg);
+                }
+            }
+            is_vis_close.store(false, Ordering::SeqCst);
+            slint::CloseRequestResponse::HideWindow
+        });
+    }
+
+    let timer = slint::Timer::default();
+    let h_timer = handle.clone();
+    let tray_h = tray.as_weak();
+    let rec_running_t = rec_running.clone();
+    let rec_start_t = Arc::new(Mutex::new(None::<Instant>));
+    let agent_running_t = agent_running.clone();
+    let agent_start_t = Arc::new(Mutex::new(None::<Instant>));
+
+    timer.start(slint::TimerMode::Repeated, std::time::Duration::from_secs(1), move || {
+        if let Some(ui) = h_timer.upgrade() {
+            if rec_running_t.load(Ordering::Relaxed) {
+                let elapsed = {
+                    let mut lock = rec_start_t.lock().unwrap();
+                    if lock.is_none() {
+                        *lock = Some(Instant::now());
+                    }
+                    lock.map(|i| i.elapsed().as_secs()).unwrap_or(0)
+                };
+                let dur_str = format!("{:02}:{:02}:{:02}", elapsed / 3600, (elapsed % 3600) / 60, elapsed % 60);
+                ui.set_rec_duration_text(dur_str.clone().into());
+
+                let total_bytes = recorder::REC_ACTIVE_SESSION_DIR
+                    .lock()
+                    .ok()
+                    .and_then(|g| g.as_ref().map(|d| calc_directory_size(d)))
+                    .unwrap_or(0);
+                ui.set_rec_size_text(format_bytes(total_bytes).into());
+
+                let chat_count = chat_logger::LIVE_CHAT_COUNT.load(Ordering::Relaxed);
+                ui.set_rec_messages_text(format!("{} сообщ.", chat_count).into());
+
+                if let Some(t) = tray_h.upgrade() {
+                    t.set_tray_tooltip(format!("Twitch recorder — Запись ({dur_str})").into());
+                    t.set_status_text(format!("🔴 Запись: {dur_str}").into());
+                }
+            } else {
+                if rec_start_t.lock().unwrap().is_some() {
+                    *rec_start_t.lock().unwrap() = None;
+                    ui.set_rec_duration_text("00:00:00".into());
+                    ui.set_rec_size_text("0 MB".into());
+                    ui.set_rec_messages_text("0 сообщ.".into());
+                }
+
+                if agent_running_t.load(Ordering::Relaxed) {
+                    let is_rec = agent::AGENT_RECORDING.load(Ordering::Relaxed);
+                    ui.set_agent_recording_now(is_rec);
+                    if is_rec {
+                        let elapsed = {
+                            let mut lock = agent_start_t.lock().unwrap();
+                            if lock.is_none() {
+                                *lock = Some(Instant::now());
+                            }
+                            lock.map(|i| i.elapsed().as_secs()).unwrap_or(0)
+                        };
+                        let dur_str = format!("{:02}:{:02}:{:02}", elapsed / 3600, (elapsed % 3600) / 60, elapsed % 60);
+                        ui.set_agent_duration_text(dur_str.clone().into());
+
+                        let total_bytes = agent::AGENT_ACTIVE_SESSION_DIR
+                            .lock()
+                            .ok()
+                            .and_then(|g| g.as_ref().map(|d| calc_directory_size(d)))
+                            .unwrap_or(0);
+                        ui.set_agent_size_text(format_bytes(total_bytes).into());
+
+                        let chat_count = chat_logger::LIVE_CHAT_COUNT.load(Ordering::Relaxed);
+                        ui.set_agent_messages_text(format!("{} сообщ.", chat_count).into());
+
+                        if let Some(t) = tray_h.upgrade() {
+                            t.set_tray_tooltip(format!("Twitch recorder — Agent: запись ({dur_str})").into());
+                            t.set_status_text(format!("🔴 Agent: запись ({dur_str})").into());
+                        }
+                    } else {
+                        *agent_start_t.lock().unwrap() = None;
+                        ui.set_agent_duration_text("00:00:00".into());
+                        ui.set_agent_size_text("0 MB".into());
+                        ui.set_agent_messages_text("0 сообщ.".into());
+                        if let Some(t) = tray_h.upgrade() {
+                            t.set_tray_tooltip("Twitch recorder — PC Agent активен".into());
+                            t.set_status_text("🟢 PC Agent активен".into());
+                        }
+                    }
+                } else {
+                    ui.set_agent_recording_now(false);
+                    if let Some(t) = tray_h.upgrade() {
+                        t.set_tray_tooltip("Twitch recorder".into());
+                        t.set_status_text("Готов к работе".into());
+                    }
+                }
+            }
+        }
+    });
+
+    main_window.show()?;
+    slint::Timer::single_shot(std::time::Duration::from_millis(50), || {
+        win_dark_mode::apply_dark_titlebar();
+    });
+    slint::Timer::single_shot(std::time::Duration::from_millis(250), || {
+        win_dark_mode::apply_dark_titlebar();
+    });
+
+    let _tray_guard = tray;
+    let _timer_guard = timer;
     main_window.run()
 }

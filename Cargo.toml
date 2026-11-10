@@ -14,7 +14,7 @@ members = [
 
 [lib]
 name = "twitch_chat"
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 # Serialization & Fast JSON parsing
