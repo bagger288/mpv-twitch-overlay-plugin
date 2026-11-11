@@ -71,6 +71,33 @@ component AppInput inherits Rectangle {
     }
 }
 
+component DialogButton inherits Rectangle {
+    in property <string> text;
+    in property <color> bg_color: #2d2d35;
+    in property <color> hover_color: #3b3b44;
+    in property <color> text_color: #ffffff;
+    callback clicked <=> touch.clicked;
+
+    horizontal-stretch: 1;
+    height: 36px;
+    background: touch.has-hover ? root.hover_color : root.bg_color;
+    border-radius: 4px;
+    animate background { duration: 150ms; }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+    }
+
+    Text {
+        text: root.text;
+        color: root.text_color;
+        font-size: 9.5pt;
+        font-weight: 600;
+        vertical-alignment: center;
+        horizontal-alignment: center;
+    }
+}
+
 export component MainWindow inherits Window {
     title: "Twitch recorder";
     icon: @image-url("assets/app.png");
@@ -100,6 +127,12 @@ export component MainWindow inherits Window {
     }
 
     // Callbacks
+    // Close confirmation dialog
+    in-out property <bool> show_close_dialog: false;
+    callback confirm_quit();
+    callback confirm_minimize_to_tray();
+    callback cancel_close();
+
     callback select_tab(int);
     callback refresh_records();
     callback open_records_folder();
@@ -704,6 +737,76 @@ export component MainWindow inherits Window {
                                 clicked => { root.save_settings(); }
                             }
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    // Modal Close Confirmation Dialog
+    if root.show_close_dialog: Rectangle {
+        background: #000000b0;
+
+        TouchArea {
+            clicked => { root.cancel_close(); }
+        }
+
+        Rectangle {
+            width: 420px;
+            background: #1f1f23;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: #3b3b44;
+            clip: true;
+
+            TouchArea { }
+
+            VerticalLayout {
+                padding: 20px;
+                spacing: 12px;
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text {
+                        text: "⚠️ Закрытие окна";
+                        font-size: 12pt;
+                        font-weight: 700;
+                        color: #ffffff;
+                        vertical-alignment: center;
+                    }
+                    Rectangle { }
+                }
+
+                Text {
+                    text: "Что вы хотите сделать с приложением?";
+                    font-size: 9.5pt;
+                    color: root.c_text_dim;
+                }
+
+                Rectangle { height: 6px; }
+
+                HorizontalLayout {
+                    spacing: 8px;
+
+                    DialogButton {
+                        text: "Выйти";
+                        bg_color: #9F2305;
+                        hover_color: #ba2a07;
+                        clicked => { root.confirm_quit(); }
+                    }
+
+                    DialogButton {
+                        text: "Свернуть в трей";
+                        bg_color: #9146ff;
+                        hover_color: #772ce8;
+                        clicked => { root.confirm_minimize_to_tray(); }
+                    }
+
+                    DialogButton {
+                        text: "Отмена";
+                        bg_color: #2d2d35;
+                        hover_color: #3b3b44;
+                        clicked => { root.cancel_close(); }
                     }
                 }
             }

@@ -273,6 +273,7 @@ fn main() -> Result<(), slint::PlatformError> {
                     let _ = ui.window().hide();
                     is_vis_tray.store(false, Ordering::SeqCst);
                 } else {
+                    ui.set_show_close_dialog(false);
                     let _ = ui.window().show();
                     is_vis_tray.store(true, Ordering::SeqCst);
                     win_dark_mode::apply_dark_titlebar();
@@ -1028,23 +1029,63 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
 
+    // Close confirmation dialog handlers
     {
-        let handle_for_close = handle.clone();
-        let cfg_arc_close = config_arc.clone();
-        let root_close = root_dir.clone();
-        let is_vis_close = is_visible.clone();
-        main_window.window().on_close_requested(move || {
-            if let Some(ui) = handle_for_close.upgrade() {
+        let handle_quit = handle.clone();
+        let cfg_quit = config_arc.clone();
+        let root_quit = root_dir.clone();
+        main_window.on_confirm_quit(move || {
+            if let Some(ui) = handle_quit.upgrade() {
                 let pos = ui.window().position();
                 if pos.x > -10000 && pos.y >= 0 {
-                    let mut cfg = cfg_arc_close.lock().unwrap();
+                    let mut cfg = cfg_quit.lock().unwrap();
                     cfg.window_x = Some(pos.x);
                     cfg.window_y = Some(pos.y);
-                    save_config(&root_close, &cfg);
+                    save_config(&root_quit, &cfg);
                 }
+                let _ = ui.hide();
             }
-            is_vis_close.store(false, Ordering::SeqCst);
-            slint::CloseRequestResponse::HideWindow
+            std::process::exit(0);
+        });
+    }
+
+    {
+        let handle_tray = handle.clone();
+        let cfg_tray = config_arc.clone();
+        let root_tray = root_dir.clone();
+        let is_vis_tray = is_visible.clone();
+        main_window.on_confirm_minimize_to_tray(move || {
+            if let Some(ui) = handle_tray.upgrade() {
+                let pos = ui.window().position();
+                if pos.x > -10000 && pos.y >= 0 {
+                    let mut cfg = cfg_tray.lock().unwrap();
+                    cfg.window_x = Some(pos.x);
+                    cfg.window_y = Some(pos.y);
+                    save_config(&root_tray, &cfg);
+                }
+                ui.set_show_close_dialog(false);
+                let _ = ui.window().hide();
+            }
+            is_vis_tray.store(false, Ordering::SeqCst);
+        });
+    }
+
+    {
+        let handle_cancel = handle.clone();
+        main_window.on_cancel_close(move || {
+            if let Some(ui) = handle_cancel.upgrade() {
+                ui.set_show_close_dialog(false);
+            }
+        });
+    }
+
+    {
+        let handle_for_close = handle.clone();
+        main_window.window().on_close_requested(move || {
+            if let Some(ui) = handle_for_close.upgrade() {
+                ui.set_show_close_dialog(true);
+            }
+            slint::CloseRequestResponse::KeepWindowShown
         });
     }
 
