@@ -56,6 +56,12 @@ pub struct AppConfig {
     #[serde(default)]
     pub window_y: Option<i32>,
 
+    #[serde(default)]
+    pub window_width: Option<u32>,
+
+    #[serde(default)]
+    pub window_height: Option<u32>,
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chat_x: Option<i32>,
 
@@ -123,6 +129,8 @@ impl Default for AppConfig {
             twitch_token_expires_at: 0,
             window_x: None,
             window_y: None,
+            window_width: None,
+            window_height: None,
             chat_x: None,
             chat_y: None,
             chat_width: None,
@@ -188,6 +196,10 @@ mod tests {
         let _ = fs::create_dir_all(&temp_dir);
 
         let mut cfg = load_config(&temp_dir);
+        cfg.window_x = Some(150);
+        cfg.window_y = Some(200);
+        cfg.window_width = Some(720);
+        cfg.window_height = Some(820);
         cfg.chat_x = Some(350);
         cfg.chat_y = Some(80);
         cfg.chat_width = Some(420);
@@ -204,6 +216,10 @@ mod tests {
         assert!(save_config(&temp_dir, &cfg));
 
         let reloaded = load_config(&temp_dir);
+        assert_eq!(reloaded.window_x, Some(150));
+        assert_eq!(reloaded.window_y, Some(200));
+        assert_eq!(reloaded.window_width, Some(720));
+        assert_eq!(reloaded.window_height, Some(820));
         assert_eq!(reloaded.chat_x, Some(350));
         assert_eq!(reloaded.chat_y, Some(80));
         assert_eq!(reloaded.chat_width, Some(420));

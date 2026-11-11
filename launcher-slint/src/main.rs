@@ -15,7 +15,7 @@ mod win_dark_mode;
 
 slint::include_modules!();
 
-use config::{load_config, save_config};
+use config::{load_config, save_config, AppConfig};
 use records::{scan_records, SessionInfo};
 use slint::{ComponentHandle, ModelRc, VecModel};
 use std::collections::HashMap;
@@ -54,6 +54,21 @@ fn get_project_root() -> PathBuf {
     }
 
     PathBuf::from(".")
+}
+
+fn save_window_geometry(ui: &MainWindow, cfg_arc: &Arc<Mutex<AppConfig>>, root: &Path) {
+    let pos = ui.window().position();
+    let size = ui.window().size();
+    if pos.x > -10000 && pos.y >= 0 {
+        let mut cfg = cfg_arc.lock().unwrap();
+        cfg.window_x = Some(pos.x);
+        cfg.window_y = Some(pos.y);
+        if size.width >= 560 && size.height >= 640 {
+            cfg.window_width = Some(size.width);
+            cfg.window_height = Some(size.height);
+        }
+        save_config(root, &cfg);
+    }
 }
 
 fn format_bytes(bytes: u64) -> String {
@@ -202,9 +217,14 @@ fn main() -> Result<(), slint::PlatformError> {
     let root_dir = get_project_root();
     let config_arc = Arc::new(Mutex::new(load_config(&root_dir)));
 
-    // Restore window position or center on screen
+    // Restore window position and size or center on screen
     {
         let cfg = config_arc.lock().unwrap();
+        if let (Some(w), Some(h)) = (cfg.window_width, cfg.window_height) {
+            if w >= 560 && h >= 640 {
+                main_window.window().set_size(slint::PhysicalSize::new(w, h));
+            }
+        }
         if let (Some(x), Some(y)) = (cfg.window_x, cfg.window_y) {
             if x > -10000 && y >= 0 {
                 main_window.window().set_position(slint::PhysicalPosition::new(x, y));
@@ -218,8 +238,8 @@ fn main() -> Result<(), slint::PlatformError> {
                 let screen_w = GetSystemMetrics(0); // SM_CXSCREEN
                 let screen_h = GetSystemMetrics(1); // SM_CYSCREEN
                 if screen_w > 0 && screen_h > 0 {
-                    let win_w = 680;
-                    let win_h = 780;
+                    let win_w = cfg.window_width.unwrap_or(680) as i32;
+                    let win_h = cfg.window_height.unwrap_or(780) as i32;
                     let cx = (screen_w - win_w) / 2;
                     let cy = (screen_h - win_h) / 2;
                     main_window.window().set_position(slint::PhysicalPosition::new(cx.max(0), cy.max(0)));
@@ -266,10 +286,13 @@ fn main() -> Result<(), slint::PlatformError> {
     {
         let handle_tray = handle.clone();
         let is_vis_tray = is_visible.clone();
+        let cfg_tray = config_arc.clone();
+        let root_tray = root_dir.clone();
         tray.on_toggle_window(move || {
             if let Some(ui) = handle_tray.upgrade() {
                 let cur = is_vis_tray.load(Ordering::SeqCst);
                 if cur {
+                    save_window_geometry(&ui, &cfg_tray, &root_tray);
                     let _ = ui.window().hide();
                     is_vis_tray.store(false, Ordering::SeqCst);
                 } else {
@@ -286,13 +309,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let root_quit = root_dir.clone();
         tray.on_quit_app(move || {
             if let Some(ui) = handle_quit.upgrade() {
-                let pos = ui.window().position();
-                if pos.x > -10000 && pos.y >= 0 {
-                    let mut cfg = cfg_quit.lock().unwrap();
-                    cfg.window_x = Some(pos.x);
-                    cfg.window_y = Some(pos.y);
-                    save_config(&root_quit, &cfg);
-                }
+                save_window_geometry(&ui, &cfg_quit, &root_quit);
             }
             std::process::exit(0);
         });
@@ -1036,13 +1053,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let root_quit = root_dir.clone();
         main_window.on_confirm_quit(move || {
             if let Some(ui) = handle_quit.upgrade() {
-                let pos = ui.window().position();
-                if pos.x > -10000 && pos.y >= 0 {
-                    let mut cfg = cfg_quit.lock().unwrap();
-                    cfg.window_x = Some(pos.x);
-                    cfg.window_y = Some(pos.y);
-                    save_config(&root_quit, &cfg);
-                }
+                save_window_geometry(&ui, &cfg_quit, &root_quit);
                 let _ = ui.hide();
             }
             std::process::exit(0);
@@ -1056,13 +1067,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let is_vis_tray = is_visible.clone();
         main_window.on_confirm_minimize_to_tray(move || {
             if let Some(ui) = handle_tray.upgrade() {
-                let pos = ui.window().position();
-                if pos.x > -10000 && pos.y >= 0 {
-                    let mut cfg = cfg_tray.lock().unwrap();
-                    cfg.window_x = Some(pos.x);
-                    cfg.window_y = Some(pos.y);
-                    save_config(&root_tray, &cfg);
-                }
+                save_window_geometry(&ui, &cfg_tray, &root_tray);
                 ui.set_show_close_dialog(false);
                 let _ = ui.window().hide();
             }
