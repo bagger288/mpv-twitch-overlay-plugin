@@ -20,10 +20,13 @@ component AppButton inherits Rectangle {
     in property <bool> primary: false;
     in property <bool> danger: false;
     in property <bool> enabled: true;
-    in property <length> custom_height: 32px;
+    in property <length> custom_height: 30px;
+    in property <length> custom_width: 0px;
     callback clicked <=> touch.clicked;
 
+    horizontal-stretch: 0;
     height: root.custom_height;
+    min-width: btn_text.preferred-width + 24px;
     border-radius: 6px;
     border-width: 1px;
     border-color: !root.enabled ? #252834 : root.primary ? (touch.has-hover ? #b785ff : #a970ff) : root.danger ? (touch.has-hover ? #d32f2f : #c62828) : (touch.has-hover ? #3f4354 : #2c303e);
@@ -36,10 +39,10 @@ component AppButton inherits Rectangle {
         mouse-cursor: root.enabled ? pointer : default;
     }
 
-    Text {
+    btn_text := Text {
         text: root.text;
         color: !root.enabled ? #555869 : #ffffff;
-        font-size: 9pt;
+        font-size: 8.5pt;
         font-weight: root.primary ? 700 : 600;
         vertical-alignment: center;
         horizontal-alignment: center;
@@ -56,7 +59,7 @@ component AppInput inherits Rectangle {
     property <bool> show-password: false;
 
     forward-focus: input;
-    height: 34px;
+    height: 32px;
     background: input.has-focus ? #1a1c25 : #14161f;
     border-radius: 6px;
     border-width: 1px;
@@ -72,7 +75,7 @@ component AppInput inherits Rectangle {
         input := TextInput {
             single-line: true;
             vertical-alignment: center;
-            font-size: 9.5pt;
+            font-size: 9pt;
             color: #efeff1;
             selection-background-color: #9146ff;
             selection-foreground-color: #ffffff;
@@ -82,12 +85,12 @@ component AppInput inherits Rectangle {
         }
 
         if root.input-type == InputType.password && root.text != "": TouchArea {
-            width: 26px;
+            width: 24px;
             mouse-cursor: pointer;
             clicked => { root.show-password = !root.show-password; }
             Text {
                 text: root.show-password ? "👁" : "🔒";
-                font-size: 10pt;
+                font-size: 9.5pt;
                 vertical-alignment: center;
                 horizontal-alignment: center;
             }
@@ -98,7 +101,7 @@ component AppInput inherits Rectangle {
         x: 10px;
         y: (parent.height - self.height) / 2;
         text: root.placeholder-text;
-        font-size: 9pt;
+        font-size: 8.5pt;
         color: #5d6174;
     }
 }
@@ -113,26 +116,26 @@ component StatCard inherits Rectangle {
     border-radius: 6px;
     border-width: 1px;
     border-color: #262938;
-    height: 52px;
+    height: 48px;
 
     VerticalLayout {
         padding-left: 10px;
         padding-right: 10px;
-        padding-top: 6px;
-        padding-bottom: 6px;
+        padding-top: 5px;
+        padding-bottom: 5px;
         spacing: 2px;
         alignment: center;
 
         HorizontalLayout {
-            spacing: 5px;
+            spacing: 4px;
             Text {
                 text: root.icon;
-                font-size: 8pt;
+                font-size: 7.5pt;
                 vertical-alignment: center;
             }
             Text {
                 text: root.label;
-                font-size: 7.5pt;
+                font-size: 7pt;
                 font-weight: 700;
                 color: #838799;
                 vertical-alignment: center;
@@ -142,7 +145,7 @@ component StatCard inherits Rectangle {
 
         Text {
             text: root.value;
-            font-size: 11pt;
+            font-size: 10.5pt;
             font-weight: 700;
             color: root.value_color;
             vertical-alignment: center;
@@ -285,45 +288,45 @@ export component MainWindow inherits Window {
     in property <bool> valid_ffmpeg: false;
 
     VerticalLayout {
-        padding: 10px;
-        spacing: 8px;
+        padding: 8px;
+        spacing: 6px;
 
         // Modern Header
         HorizontalLayout {
-            height: 38px;
-            spacing: 10px;
+            height: 36px;
+            spacing: 8px;
 
             Image {
                 source: @image-url("assets/app.png");
-                width: 34px;
-                height: 34px;
+                width: 32px;
+                height: 32px;
             }
 
             VerticalLayout {
                 spacing: 1px;
 
                 HorizontalLayout {
-                    spacing: 8px;
+                    spacing: 6px;
                     Text {
                         text: "Twitch Recorder";
-                        font-size: 13pt;
+                        font-size: 12pt;
                         font-weight: 800;
                         color: #ffffff;
                         vertical-alignment: center;
                     }
                     Rectangle {
-                        height: 18px;
+                        height: 16px;
                         background: #9146ff26;
                         border-radius: 4px;
                         border-width: 1px;
                         border-color: #9146ff66;
                         y: 2px;
                         HorizontalLayout {
-                            padding-left: 6px;
-                            padding-right: 6px;
+                            padding-left: 5px;
+                            padding-right: 5px;
                             Text {
                                 text: "RUST ENGINE";
-                                font-size: 7pt;
+                                font-size: 6.5pt;
                                 font-weight: 800;
                                 color: #c499ff;
                                 vertical-alignment: center;
@@ -332,8 +335,8 @@ export component MainWindow inherits Window {
                     }
                 }
                 Text {
-                    text: "Запись прямых трансляций, чата и интерактивный просмотр";
-                    font-size: 8.5pt;
+                    text: "Запись трансляций, чата и воспроизведение";
+                    font-size: 8pt;
                     color: root.c_text_dim;
                 }
             }
@@ -342,29 +345,29 @@ export component MainWindow inherits Window {
 
             // Live status badge in header
             Rectangle {
-                height: 26px;
+                height: 24px;
                 background: root.rec_active ? #ff174418 : (root.agent_active ? #00e67614 : #171922);
-                border-radius: 13px;
+                border-radius: 12px;
                 border-width: 1px;
                 border-color: root.rec_active ? #ff174488 : (root.agent_active ? #00e67655 : #252836);
                 y: 6px;
 
                 HorizontalLayout {
-                    padding-left: 10px;
-                    padding-right: 10px;
-                    spacing: 6px;
+                    padding-left: 8px;
+                    padding-right: 8px;
+                    spacing: 5px;
 
                     Rectangle {
-                        width: 7px;
-                        height: 7px;
-                        border-radius: 3.5px;
+                        width: 6px;
+                        height: 6px;
+                        border-radius: 3px;
                         background: root.rec_active ? #ff1744 : (root.agent_active ? #00e676 : #6c7082);
-                        y: 9.5px;
+                        y: 9px;
                     }
 
                     Text {
                         text: root.rec_active ? "ЗАПИСЬ" : (root.agent_active ? "АГЕНТ ВКЛ" : "ОЖИДАНИЕ");
-                        font-size: 7.5pt;
+                        font-size: 7pt;
                         font-weight: 800;
                         color: root.rec_active ? #ff5252 : (root.agent_active ? #00e676 : #7f8396);
                         vertical-alignment: center;
@@ -375,7 +378,7 @@ export component MainWindow inherits Window {
 
         // Modern Segmented Tab Bar
         Rectangle {
-            height: 38px;
+            height: 36px;
             background: #11131b;
             border-radius: 8px;
             border-width: 1px;
@@ -407,36 +410,36 @@ export component MainWindow inherits Window {
                     }
 
                     HorizontalLayout {
-                        spacing: 6px;
+                        spacing: 5px;
                         alignment: center;
 
                         Text {
                             text: tab_item.icon;
-                            font-size: 9pt;
+                            font-size: 8.5pt;
                             vertical-alignment: center;
                         }
 
                         Text {
                             text: tab_item.title;
                             color: root.active_tab == i ? #ffffff : (tab_touch.has-hover ? #f0f0f4 : #8b8f9f);
-                            font-size: 9pt;
+                            font-size: 8.5pt;
                             font-weight: root.active_tab == i ? 700 : 500;
                             vertical-alignment: center;
                         }
 
                         if i == 2 && root.rec_active: Rectangle {
-                            width: 6px;
-                            height: 6px;
-                            border-radius: 3px;
+                            width: 5px;
+                            height: 5px;
+                            border-radius: 2.5px;
                             background: #ff1744;
-                            y: 13px;
+                            y: 12.5px;
                         }
                         if i == 3 && root.agent_active: Rectangle {
-                            width: 6px;
-                            height: 6px;
-                            border-radius: 3px;
+                            width: 5px;
+                            height: 5px;
+                            border-radius: 2.5px;
                             background: #00e676;
-                            y: 13px;
+                            y: 12.5px;
                         }
                     }
                 }
@@ -452,21 +455,21 @@ export component MainWindow inherits Window {
 
             // Tab 1: Records
             if root.active_tab == 0: VerticalLayout {
-                padding: 10px;
-                spacing: 8px;
+                padding: 8px;
+                spacing: 6px;
 
                 HorizontalLayout {
-                    spacing: 10px;
+                    spacing: 8px;
 
                     // Left channel column
                     VerticalLayout {
-                        width: 160px;
-                        spacing: 6px;
+                        width: 140px;
+                        spacing: 4px;
 
                         HorizontalLayout {
                             Text {
                                 text: "КАНАЛЫ";
-                                font-size: 8pt;
+                                font-size: 7.5pt;
                                 font-weight: 800;
                                 color: #767a8c;
                                 vertical-alignment: center;
@@ -476,11 +479,11 @@ export component MainWindow inherits Window {
 
                         ScrollView {
                             VerticalLayout {
-                                spacing: 3px;
+                                spacing: 2px;
                                 for ch in root.channels: Rectangle {
-                                    height: 32px;
+                                    height: 30px;
                                     background: root.selected_channel == ch.name ? #9146ff : (ch_touch.has-hover ? #1f2230 : #171924);
-                                    border-radius: 6px;
+                                    border-radius: 5px;
                                     border-width: 1px;
                                     border-color: root.selected_channel == ch.name ? #b17eff : (ch_touch.has-hover ? #303546 : #232635);
                                     animate background { duration: 120ms; }
@@ -495,32 +498,33 @@ export component MainWindow inherits Window {
 
                                     HorizontalLayout {
                                         padding-left: 8px;
-                                        padding-right: 8px;
-                                        spacing: 6px;
+                                        padding-right: 6px;
+                                        spacing: 4px;
 
                                         Text {
                                             text: ch.name;
                                             color: #ffffff;
-                                            font-size: 9pt;
+                                            font-size: 8.5pt;
                                             font-weight: root.selected_channel == ch.name ? 700 : 500;
                                             vertical-alignment: center;
+                                            overflow: elide;
                                         }
 
                                         Rectangle { }
 
                                         Rectangle {
-                                            height: 18px;
+                                            height: 16px;
                                             background: root.selected_channel == ch.name ? #ffffff33 : #242736;
-                                            border-radius: 9px;
+                                            border-radius: 8px;
                                             y: 7px;
 
                                             HorizontalLayout {
-                                                padding-left: 6px;
-                                                padding-right: 6px;
+                                                padding-left: 5px;
+                                                padding-right: 5px;
                                                 Text {
                                                     text: ch.count;
                                                     color: root.selected_channel == ch.name ? #ffffff : #8a8e9f;
-                                                    font-size: 7.5pt;
+                                                    font-size: 7pt;
                                                     font-weight: 700;
                                                     vertical-alignment: center;
                                                 }
@@ -534,19 +538,20 @@ export component MainWindow inherits Window {
 
                     // Right table view
                     VerticalLayout {
-                        spacing: 6px;
+                        spacing: 4px;
 
                         // Toolbar
                         HorizontalLayout {
-                            height: 30px;
+                            height: 28px;
                             spacing: 6px;
 
                             Text {
                                 text: root.selected_channel != "" ? "Записи: " + root.selected_channel : "Выберите канал";
-                                font-size: 10pt;
+                                font-size: 9.5pt;
                                 font-weight: 700;
                                 color: #ffffff;
                                 vertical-alignment: center;
+                                overflow: elide;
                             }
                             Rectangle { } // Spacer
                             AppButton {
@@ -561,33 +566,33 @@ export component MainWindow inherits Window {
 
                         // Table Header
                         Rectangle {
-                            height: 28px;
+                            height: 26px;
                             background: #191c26;
-                            border-radius: 6px;
+                            border-radius: 5px;
                             border-width: 1px;
                             border-color: #262938;
 
                             HorizontalLayout {
-                                padding-left: 10px;
-                                padding-right: 10px;
-                                spacing: 6px;
-                                Text { width: 145px; text: "Дата и время"; font-size: 8pt; font-weight: 700; color: #838799; vertical-alignment: center; }
-                                Text { width: 48px; text: "Части"; font-size: 8pt; font-weight: 700; color: #838799; vertical-alignment: center; }
-                                Text { width: 75px; text: "Время"; font-size: 8pt; font-weight: 700; color: #838799; vertical-alignment: center; }
-                                Text { width: 75px; text: "Размер"; font-size: 8pt; font-weight: 700; color: #838799; vertical-alignment: center; }
-                                Text { width: 48px; text: "Чат"; font-size: 8pt; font-weight: 700; color: #838799; horizontal-alignment: center; vertical-alignment: center; }
-                                Text { width: 55px; text: "Эмоуты"; font-size: 8pt; font-weight: 700; color: #838799; horizontal-alignment: center; vertical-alignment: center; }
+                                padding-left: 8px;
+                                padding-right: 8px;
+                                spacing: 4px;
+                                Text { width: 130px; text: "Дата и время"; font-size: 7.5pt; font-weight: 700; color: #838799; vertical-alignment: center; }
+                                Text { width: 40px; text: "Части"; font-size: 7.5pt; font-weight: 700; color: #838799; vertical-alignment: center; }
+                                Text { width: 62px; text: "Время"; font-size: 7.5pt; font-weight: 700; color: #838799; vertical-alignment: center; }
+                                Text { width: 62px; text: "Размер"; font-size: 7.5pt; font-weight: 700; color: #838799; vertical-alignment: center; }
+                                Text { width: 44px; text: "Чат"; font-size: 7.5pt; font-weight: 700; color: #838799; horizontal-alignment: center; vertical-alignment: center; }
+                                Text { width: 48px; text: "Эмоуты"; font-size: 7.5pt; font-weight: 700; color: #838799; horizontal-alignment: center; vertical-alignment: center; }
                             }
                         }
 
                         // Recordings List
                         ScrollView {
                             VerticalLayout {
-                                spacing: 3px;
+                                spacing: 2px;
                                 for rec in root.recordings: Rectangle {
-                                    height: 34px;
+                                    height: 32px;
                                     background: root.selected_recording_id == rec.id ? #241c38 : (rec_touch.has-hover ? #1c1e28 : #151722);
-                                    border-radius: 6px;
+                                    border-radius: 5px;
                                     border-width: 1px;
                                     border-color: root.selected_recording_id == rec.id ? #9146ff : (rec_touch.has-hover ? #2e3242 : #222532);
                                     animate background { duration: 100ms; }
@@ -605,18 +610,18 @@ export component MainWindow inherits Window {
                                     }
 
                                     HorizontalLayout {
-                                        padding-left: 10px;
-                                        padding-right: 10px;
-                                        spacing: 6px;
-                                        Text { width: 145px; text: rec.date_str; color: #ffffff; font-size: 9pt; font-weight: root.selected_recording_id == rec.id ? 700 : 400; vertical-alignment: center; }
-                                        Text { width: 48px; text: rec.parts_count + " ч."; color: #8b8f9f; font-size: 8.5pt; vertical-alignment: center; }
-                                        Text { width: 75px; text: rec.duration_str; color: #e2e4ee; font-size: 9pt; vertical-alignment: center; }
-                                        Text { width: 75px; text: rec.size_str; color: #8b8f9f; font-size: 8.5pt; vertical-alignment: center; }
+                                        padding-left: 8px;
+                                        padding-right: 8px;
+                                        spacing: 4px;
+                                        Text { width: 130px; text: rec.date_str; color: #ffffff; font-size: 8.5pt; font-weight: root.selected_recording_id == rec.id ? 700 : 400; vertical-alignment: center; overflow: elide; }
+                                        Text { width: 40px; text: rec.parts_count + " ч."; color: #8b8f9f; font-size: 8pt; vertical-alignment: center; }
+                                        Text { width: 62px; text: rec.duration_str; color: #e2e4ee; font-size: 8.5pt; vertical-alignment: center; }
+                                        Text { width: 62px; text: rec.size_str; color: #8b8f9f; font-size: 8pt; vertical-alignment: center; }
 
                                         // Chat badge
                                         Rectangle {
-                                            width: 48px;
-                                            height: 20px;
+                                            width: 44px;
+                                            height: 18px;
                                             border-radius: 4px;
                                             background: rec.has_chat ? #00e67618 : #1c1e28;
                                             y: 7px;
@@ -624,7 +629,7 @@ export component MainWindow inherits Window {
                                             Text {
                                                 text: rec.has_chat ? "✓ ЧАТ" : "—";
                                                 color: rec.has_chat ? #00e676 : #484b5c;
-                                                font-size: 7pt;
+                                                font-size: 6.5pt;
                                                 font-weight: 700;
                                                 horizontal-alignment: center;
                                                 vertical-alignment: center;
@@ -633,8 +638,8 @@ export component MainWindow inherits Window {
 
                                         // Emotes badge
                                         Rectangle {
-                                            width: 55px;
-                                            height: 20px;
+                                            width: 48px;
+                                            height: 18px;
                                             border-radius: 4px;
                                             background: rec.has_emotes ? #bf94ff22 : #1c1e28;
                                             y: 7px;
@@ -642,7 +647,7 @@ export component MainWindow inherits Window {
                                             Text {
                                                 text: rec.has_emotes ? "★ ЭМО" : "—";
                                                 color: rec.has_emotes ? #c499ff : #484b5c;
-                                                font-size: 7pt;
+                                                font-size: 6.5pt;
                                                 font-weight: 700;
                                                 horizontal-alignment: center;
                                                 vertical-alignment: center;
@@ -657,12 +662,12 @@ export component MainWindow inherits Window {
 
                 // Footer
                 HorizontalLayout {
-                    height: 38px;
+                    height: 34px;
                     spacing: 8px;
                     Text {
-                        text: "💡 Двойной клик по строке для запуска воспроизведения";
+                        text: "Двойной клик — запуск";
                         color: #727687;
-                        font-size: 8.5pt;
+                        font-size: 8pt;
                         vertical-alignment: center;
                     }
                     Rectangle { } // Spacer
@@ -673,7 +678,7 @@ export component MainWindow inherits Window {
                     AppButton {
                         text: "▶ Смотреть в mpv";
                         primary: true;
-                        custom_height: 36px;
+                        custom_height: 32px;
                         clicked => { root.launch_mpv(); }
                     }
                 }
@@ -681,93 +686,76 @@ export component MainWindow inherits Window {
 
             // Tab 2: Import
             if root.active_tab == 1: VerticalLayout {
-                padding: 12px;
+                padding: 10px;
                 spacing: 8px;
 
-                Text { text: "Импорт чата для существующих видеофайлов"; font-size: 11pt; font-weight: 700; color: root.c_title; }
+                Text { text: "Импорт чата для существующих видеофайлов"; font-size: 10.5pt; font-weight: 700; color: root.c_title; }
 
-                HorizontalLayout {
-                    spacing: 10px;
+                // Grouped configuration container
+                Rectangle {
+                    background: #171924;
+                    border-radius: 6px;
+                    border-width: 1px;
+                    border-color: #252838;
 
-                    // Source block
-                    Rectangle {
-                        background: #171924;
-                        border-radius: 6px;
-                        border-width: 1px;
-                        border-color: #252838;
+                    VerticalLayout {
+                        padding: 10px;
+                        spacing: 6px;
 
-                        VerticalLayout {
-                            padding: 10px;
+                        Text { text: "Канал Twitch:"; font-size: 8.5pt; font-weight: 600; color: root.c_text_dim; }
+                        AppInput { text <=> root.imp_channel; placeholder-text: "Например: shroud"; }
+
+                        Text { text: "Файлы видео (video.ts / mp4 через ';'):"; font-size: 8.5pt; font-weight: 600; color: root.c_text_dim; }
+                        HorizontalLayout {
                             spacing: 6px;
-
-                            Text { text: "Канал Twitch:"; font-size: 8.5pt; font-weight: 600; color: root.c_text_dim; }
-                            AppInput { text <=> root.imp_channel; placeholder-text: "Например: shroud"; }
-
-                            Text { text: "Файлы видео (video.ts / mp4 через ';'):"; font-size: 8.5pt; font-weight: 600; color: root.c_text_dim; }
-                            HorizontalLayout {
-                                spacing: 6px;
-                                AppInput { text <=> root.imp_video; placeholder-text: "Пути к файлам video.ts / mp4"; }
-                                AppButton { text: "Обзор…"; clicked => { root.browse_import_video(); } }
-                            }
+                            AppInput { text <=> root.imp_video; placeholder-text: "Пути к файлам video.ts / mp4"; }
+                            AppButton { text: "Обзор…"; clicked => { root.browse_import_video(); } }
                         }
-                    }
 
-                    // Sync block
-                    Rectangle {
-                        background: #171924;
-                        border-radius: 6px;
-                        border-width: 1px;
-                        border-color: #252838;
+                        Text { text: "Старт видео (UTC): YYYY-MM-DD HH:MM:SS"; font-size: 8.5pt; font-weight: 600; color: root.c_text_dim; }
+                        AppInput { text <=> root.imp_time; placeholder-text: "2026-11-04 12:00:00"; }
 
-                        VerticalLayout {
-                            padding: 10px;
-                            spacing: 6px;
+                        HorizontalLayout {
+                            spacing: 8px;
+                            height: 24px;
+                            Rectangle {
+                                width: 16px;
+                                height: 16px;
+                                border-width: 1.5px;
+                                border-color: root.imp_auto_detect ? root.c_accent : #3a3e50;
+                                border-radius: 3px;
+                                background: root.imp_auto_detect ? root.c_accent : #1a1c26;
+                                y: 4px;
 
-                            Text { text: "Старт видео (UTC): YYYY-MM-DD HH:MM:SS"; font-size: 8.5pt; font-weight: 600; color: root.c_text_dim; }
-                            AppInput { text <=> root.imp_time; placeholder-text: "2026-11-04 12:00:00"; }
-
-                            HorizontalLayout {
-                                spacing: 8px;
-                                height: 26px;
-                                Rectangle {
-                                    width: 18px;
-                                    height: 18px;
-                                    border-width: 1.5px;
-                                    border-color: root.imp_auto_detect ? root.c_accent : #3a3e50;
-                                    border-radius: 4px;
-                                    background: root.imp_auto_detect ? root.c_accent : #1a1c26;
-                                    y: 4px;
-
-                                    if root.imp_auto_detect: Text {
-                                        text: "✓";
-                                        color: #ffffff;
-                                        font-size: 9pt;
-                                        font-weight: 700;
-                                        horizontal-alignment: center;
-                                        vertical-alignment: center;
-                                    }
-
-                                    TouchArea {
-                                        mouse-cursor: pointer;
-                                        clicked => { root.imp_auto_detect = !root.imp_auto_detect; }
-                                    }
-                                }
-                                Text {
-                                    text: "Автоопределение старта по сообщениям чата";
-                                    color: root.c_text;
-                                    font-size: 9pt;
+                                if root.imp_auto_detect: Text {
+                                    text: "✓";
+                                    color: #ffffff;
+                                    font-size: 8.5pt;
+                                    font-weight: 700;
+                                    horizontal-alignment: center;
                                     vertical-alignment: center;
-                                    TouchArea {
-                                        mouse-cursor: pointer;
-                                        clicked => { root.imp_auto_detect = !root.imp_auto_detect; }
-                                    }
                                 }
-                                Rectangle { }
-                            }
 
-                            Text { text: "Даты архива (UTC): YYYY-MM-DD, …"; font-size: 8.5pt; font-weight: 600; color: root.c_text_dim; }
-                            AppInput { text <=> root.imp_dates; placeholder-text: "2026-11-04"; }
+                                TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.imp_auto_detect = !root.imp_auto_detect; }
+                                }
+                            }
+                            Text {
+                                text: "Автоопределение старта по сообщениям чата";
+                                color: root.c_text;
+                                font-size: 8.5pt;
+                                vertical-alignment: center;
+                                TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.imp_auto_detect = !root.imp_auto_detect; }
+                                }
+                            }
+                            Rectangle { }
                         }
+
+                        Text { text: "Даты архива (UTC): YYYY-MM-DD, …"; font-size: 8.5pt; font-weight: 600; color: root.c_text_dim; }
+                        AppInput { text <=> root.imp_dates; placeholder-text: "2026-11-04"; }
                     }
                 }
 
@@ -775,7 +763,7 @@ export component MainWindow inherits Window {
                     AppButton {
                         text: "⚡ Создать сессию из архива";
                         primary: true;
-                        custom_height: 36px;
+                        custom_height: 34px;
                         enabled: !root.imp_busy;
                         clicked => { root.run_import(); }
                     }
@@ -790,11 +778,11 @@ export component MainWindow inherits Window {
                     border-color: #1e212d;
 
                     VerticalLayout {
-                        padding: 8px;
+                        padding: 6px;
                         spacing: 4px;
 
                         HorizontalLayout {
-                            Text { text: "Терминал импорта"; font-size: 8pt; font-weight: 700; color: #5d6174; }
+                            Text { text: "Терминал импорта"; font-size: 7.5pt; font-weight: 700; color: #5d6174; }
                             Rectangle { }
                         }
 
@@ -803,7 +791,7 @@ export component MainWindow inherits Window {
                                 text: root.imp_console_text;
                                 color: #cfd2e0;
                                 font-family: "Consolas";
-                                font-size: 8.5pt;
+                                font-size: 8pt;
                             }
                         }
                     }
@@ -812,10 +800,10 @@ export component MainWindow inherits Window {
 
             // Tab 3: Record
             if root.active_tab == 2: VerticalLayout {
-                padding: 12px;
+                padding: 10px;
                 spacing: 8px;
 
-                Text { text: "Прямая запись стрима и чата"; font-size: 11pt; font-weight: 700; color: root.c_title; }
+                Text { text: "Прямая запись стрима и чата"; font-size: 10.5pt; font-weight: 700; color: root.c_title; }
 
                 Rectangle {
                     background: #171924;
@@ -825,20 +813,20 @@ export component MainWindow inherits Window {
 
                     VerticalLayout {
                         padding: 10px;
-                        spacing: 8px;
+                        spacing: 6px;
 
                         HorizontalLayout {
-                            spacing: 12px;
+                            spacing: 10px;
 
                             VerticalLayout {
-                                spacing: 4px;
+                                spacing: 3px;
                                 Text { text: "Канал Twitch:"; font-size: 8.5pt; font-weight: 600; color: root.c_text_dim; }
                                 AppInput { text <=> root.rec_channel; placeholder-text: "Имя канала для записи"; }
                             }
 
                             VerticalLayout {
-                                width: 140px;
-                                spacing: 4px;
+                                width: 130px;
+                                spacing: 3px;
                                 Text { text: "Качество:"; font-size: 8.5pt; font-weight: 600; color: root.c_text_dim; }
                                 ComboBox {
                                     model: ["best", "1080p60", "720p60", "480p", "worst"];
@@ -848,20 +836,21 @@ export component MainWindow inherits Window {
                         }
 
                         HorizontalLayout {
-                            spacing: 10px;
+                            spacing: 8px;
                             AppButton {
-                                text: root.rec_active ? "⏹ Остановить запись" : "🔴 Начать запись стрима";
+                                text: root.rec_active ? "⏹ Остановить запись" : "🔴 Начать запись";
                                 primary: !root.rec_active;
                                 danger: root.rec_active;
-                                custom_height: 36px;
+                                custom_height: 34px;
                                 clicked => { root.toggle_recording(); }
                             }
                             Text {
                                 text: root.rec_status_text;
                                 color: root.rec_active ? #00e676 : root.c_text_dim;
-                                font-size: 9pt;
+                                font-size: 8.5pt;
                                 font-weight: 600;
                                 vertical-alignment: center;
+                                overflow: elide;
                             }
                             Rectangle { }
                         }
@@ -870,7 +859,7 @@ export component MainWindow inherits Window {
 
                 // Modern 3-Stat Metrics Cards
                 if root.rec_active: HorizontalLayout {
-                    spacing: 8px;
+                    spacing: 6px;
                     StatCard {
                         label: "ДЛИТЕЛЬНОСТЬ";
                         value: root.rec_duration_text;
@@ -899,11 +888,11 @@ export component MainWindow inherits Window {
                     border-color: #1e212d;
 
                     VerticalLayout {
-                        padding: 8px;
+                        padding: 6px;
                         spacing: 4px;
 
                         HorizontalLayout {
-                            Text { text: "Лог записи Streamlink / Twitch Chat"; font-size: 8pt; font-weight: 700; color: #5d6174; }
+                            Text { text: "Лог записи Streamlink / Twitch Chat"; font-size: 7.5pt; font-weight: 700; color: #5d6174; }
                             Rectangle { }
                         }
 
@@ -912,7 +901,7 @@ export component MainWindow inherits Window {
                                 text: root.rec_console_text;
                                 color: #cfd2e0;
                                 font-family: "Consolas";
-                                font-size: 8.5pt;
+                                font-size: 8pt;
                             }
                         }
                     }
@@ -921,10 +910,10 @@ export component MainWindow inherits Window {
 
             // Tab 4: PC Agent
             if root.active_tab == 3: VerticalLayout {
-                padding: 12px;
+                padding: 10px;
                 spacing: 8px;
 
-                Text { text: "Автоматический PC Agent"; font-size: 11pt; font-weight: 700; color: root.c_title; }
+                Text { text: "Автоматический PC Agent"; font-size: 10.5pt; font-weight: 700; color: root.c_title; }
 
                 Rectangle {
                     background: #171924;
@@ -934,7 +923,7 @@ export component MainWindow inherits Window {
 
                     VerticalLayout {
                         padding: 10px;
-                        spacing: 8px;
+                        spacing: 6px;
 
                         Text {
                             text: "Подключается к серверу мониторинга и автоматически запускает запись при начале стрима.";
@@ -945,42 +934,43 @@ export component MainWindow inherits Window {
                         HorizontalLayout {
                             spacing: 8px;
                             AppButton {
-                                text: root.agent_active ? "⏹ Остановить агент" : "▶ Запустить агент";
+                                text: root.agent_active ? "⏹ Остановить" : "▶ Запустить агент";
                                 primary: !root.agent_active;
                                 danger: root.agent_active;
-                                custom_height: 36px;
+                                custom_height: 34px;
                                 clicked => { root.toggle_pc_agent(); }
                             }
                             AppButton {
                                 text: "Очистить лог";
+                                custom_height: 34px;
                                 clicked => { root.clear_pc_agent_console(); }
                             }
                             Rectangle { }
 
                             Rectangle {
-                                height: 26px;
+                                height: 24px;
                                 background: root.agent_active ? #00e67618 : #202330;
-                                border-radius: 13px;
+                                border-radius: 12px;
                                 border-width: 1px;
                                 border-color: root.agent_active ? #00e67666 : #2d3040;
                                 y: 5px;
 
                                 HorizontalLayout {
-                                    padding-left: 10px;
-                                    padding-right: 10px;
-                                    spacing: 6px;
+                                    padding-left: 8px;
+                                    padding-right: 8px;
+                                    spacing: 5px;
 
                                     Rectangle {
-                                        width: 7px;
-                                        height: 7px;
-                                        border-radius: 3.5px;
+                                        width: 6px;
+                                        height: 6px;
+                                        border-radius: 3px;
                                         background: root.agent_active ? #00e676 : #6c7082;
-                                        y: 9.5px;
+                                        y: 9px;
                                     }
 
                                     Text {
                                         text: root.agent_status_text;
-                                        font-size: 8pt;
+                                        font-size: 7.5pt;
                                         font-weight: 700;
                                         color: root.agent_active ? #00e676 : #8a8e9f;
                                         vertical-alignment: center;
@@ -993,7 +983,7 @@ export component MainWindow inherits Window {
 
                 // 3-Stat Metrics Cards when agent is recording
                 if root.agent_recording_now: HorizontalLayout {
-                    spacing: 8px;
+                    spacing: 6px;
                     StatCard {
                         label: "ДЛИТЕЛЬНОСТЬ";
                         value: root.agent_duration_text;
@@ -1022,11 +1012,11 @@ export component MainWindow inherits Window {
                     border-color: #1e212d;
 
                     VerticalLayout {
-                        padding: 8px;
+                        padding: 6px;
                         spacing: 4px;
 
                         HorizontalLayout {
-                            Text { text: "Лог событий агента"; font-size: 8pt; font-weight: 700; color: #5d6174; }
+                            Text { text: "Лог событий агента"; font-size: 7.5pt; font-weight: 700; color: #5d6174; }
                             Rectangle { }
                         }
 
@@ -1035,7 +1025,7 @@ export component MainWindow inherits Window {
                                 text: root.agent_console_text;
                                 color: #cfd2e0;
                                 font-family: "Consolas";
-                                font-size: 8.5pt;
+                                font-size: 8pt;
                             }
                         }
                     }
@@ -1044,13 +1034,13 @@ export component MainWindow inherits Window {
 
             // Tab 5: Settings
             if root.active_tab == 4: VerticalLayout {
-                padding: 12px;
+                padding: 10px;
                 spacing: 8px;
 
                 ScrollView {
                     VerticalLayout {
-                        spacing: 10px;
-                        padding-right: 10px;
+                        spacing: 8px;
+                        padding-right: 8px;
 
                         // Section 1: Tools
                         Rectangle {
@@ -1060,17 +1050,17 @@ export component MainWindow inherits Window {
                             border-color: #252838;
 
                             VerticalLayout {
-                                padding: 12px;
-                                spacing: 8px;
+                                padding: 10px;
+                                spacing: 6px;
 
-                                Text { text: "ВНЕШНИЕ УТИЛИТЫ"; font-size: 8pt; font-weight: 800; color: #767a8c; }
+                                Text { text: "ВНЕШНИЕ УТИЛИТЫ"; font-size: 7.5pt; font-weight: 800; color: #767a8c; }
 
                                 Text { text: "Путь к Streamlink:"; font-size: 8.5pt; color: root.c_text_dim; }
                                 AppInput { text <=> root.cfg_streamlink; }
                                 if root.status_streamlink != "": Text {
                                     text: root.status_streamlink;
                                     color: root.valid_streamlink ? #00e676 : #ff5252;
-                                    font-size: 8.5pt;
+                                    font-size: 8pt;
                                     font-weight: 700;
                                 }
 
@@ -1079,7 +1069,7 @@ export component MainWindow inherits Window {
                                 if root.status_mpv != "": Text {
                                     text: root.status_mpv;
                                     color: root.valid_mpv ? #00e676 : #ff5252;
-                                    font-size: 8.5pt;
+                                    font-size: 8pt;
                                     font-weight: 700;
                                 }
 
@@ -1087,7 +1077,7 @@ export component MainWindow inherits Window {
                                 if root.status_ffmpeg != "": Text {
                                     text: root.status_ffmpeg;
                                     color: root.valid_ffmpeg ? #00e676 : #ffb300;
-                                    font-size: 8.5pt;
+                                    font-size: 8pt;
                                     font-weight: 700;
                                 }
 
@@ -1109,10 +1099,10 @@ export component MainWindow inherits Window {
                             border-color: #252838;
 
                             VerticalLayout {
-                                padding: 12px;
-                                spacing: 8px;
+                                padding: 10px;
+                                spacing: 6px;
 
-                                Text { text: "TWITCH API И АВТОРИЗАЦИЯ"; font-size: 8pt; font-weight: 800; color: #767a8c; }
+                                Text { text: "TWITCH API И АВТОРИЗАЦИЯ"; font-size: 7.5pt; font-weight: 800; color: #767a8c; }
 
                                 Text { text: "Twitch Client ID:"; font-size: 8.5pt; color: root.c_text_dim; }
                                 AppInput { text <=> root.cfg_client_id; }
@@ -1129,7 +1119,7 @@ export component MainWindow inherits Window {
                                 HorizontalLayout {
                                     spacing: 8px;
                                     AppButton { text: "Обновить токен"; clicked => { root.refresh_token_manually(); } }
-                                    Text { text: root.cfg_token_status; color: root.c_text_dim; font-size: 8.5pt; vertical-alignment: center; }
+                                    Text { text: root.cfg_token_status; color: root.c_text_dim; font-size: 8pt; vertical-alignment: center; overflow: elide; }
                                     Rectangle { }
                                 }
                             }
@@ -1143,10 +1133,10 @@ export component MainWindow inherits Window {
                             border-color: #252838;
 
                             VerticalLayout {
-                                padding: 12px;
-                                spacing: 8px;
+                                padding: 10px;
+                                spacing: 6px;
 
-                                Text { text: "КАТАЛОГИ И СЕТЬ"; font-size: 8pt; font-weight: 800; color: #767a8c; }
+                                Text { text: "КАТАЛОГИ И СЕТЬ"; font-size: 7.5pt; font-weight: 800; color: #767a8c; }
 
                                 Text { text: "Папка records:"; font-size: 8.5pt; color: root.c_text_dim; }
                                 AppInput { text <=> root.cfg_records_dir; }
@@ -1159,7 +1149,7 @@ export component MainWindow inherits Window {
 
                                 HorizontalLayout {
                                     spacing: 8px;
-                                    Text { text: "Движок чата: Rust (twitch_chat.dll)"; color: #a3be8c; font-weight: 700; font-size: 8.5pt; vertical-alignment: center; }
+                                    Text { text: "Движок чата: Rust (twitch_chat.dll)"; color: #a3be8c; font-weight: 700; font-size: 8pt; vertical-alignment: center; }
                                     Rectangle { }
                                 }
                             }
@@ -1171,7 +1161,7 @@ export component MainWindow inherits Window {
                             AppButton {
                                 text: "💾 Сохранить настройки";
                                 primary: true;
-                                custom_height: 38px;
+                                custom_height: 34px;
                                 clicked => { root.save_settings(); }
                             }
                         }
