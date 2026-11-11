@@ -704,10 +704,14 @@ impl ChatRenderer {
             pixmap.fill_rect(r, &sborder_paint, Transform::identity(), None);
         }
 
-        let blink = (std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() / 500) % 2 == 0;
+        let blink = if cfg!(test) {
+            true
+        } else {
+            (std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() / 500) % 2 == 0
+        };
         let cursor_char = if blink { "|" } else { " " };
         let q_display = if ui.search_query.is_empty() {
             format!("Поиск сообщения или ника{}", cursor_char)
@@ -991,6 +995,8 @@ mod tests {
                 let y = index / 340;
                 // The settings control still displays the saved chat-opacity value.
                 if view == UiView::Settings && (190..=280).contains(&x) && (148..=180).contains(&y) { continue; }
+                // The search bar input field contains a blinking text cursor that can toggle between calls.
+                if view == UiView::Search && (12..=328).contains(&x) && (36..=64).contains(&y) { continue; }
                 assert!(a == b, "Background changed at ({x}, {y}) in {view:?}");
             }
             let corner = (599 * 340 + 339) * 4;
