@@ -1198,3 +1198,16 @@ fn main() -> Result<(), slint::PlatformError> {
     let _timer_guard = timer;
     main_window.run()
 }
+
+
+#[cfg(test)]
+mod close_dialog_test {
+    use super::*;
+
+    #[test]
+    fn test_close_dialog_properties() {
+        let win = MainWindow::new().unwrap();
+        win.set_show_close_dialog(true);
+        assert!(win.get_show_close_dialog());
+    }
+}

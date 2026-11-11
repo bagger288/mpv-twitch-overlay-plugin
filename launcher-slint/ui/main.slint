@@ -752,6 +752,7 @@ export component MainWindow inherits Window {
 
         Rectangle {
             width: 280px;
+            height: card_layout.preferred-height;
             background: #1f1f23;
             border-radius: 8px;
             border-width: 1px;
@@ -760,9 +761,12 @@ export component MainWindow inherits Window {
 
             TouchArea { }
 
-            VerticalLayout {
-                padding: 16px;
-                spacing: 8px;
+            card_layout := VerticalLayout {
+                padding-top: 14px;
+                padding-bottom: 14px;
+                padding-left: 16px;
+                padding-right: 16px;
+                spacing: 6px;
 
                 Text {
                     text: "Закрытие лаунчера";
@@ -779,7 +783,7 @@ export component MainWindow inherits Window {
                     horizontal-alignment: center;
                 }
 
-                Rectangle { height: 4px; }
+                Rectangle { height: 2px; }
 
                 DialogButton {
                     text: "Выйти";
