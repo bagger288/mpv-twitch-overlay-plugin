@@ -477,17 +477,15 @@ export component MainWindow inherits Window {
                             font-weight: 600;
                             vertical-alignment: center;
                         }
-                        Rectangle { } // Spacer
+                        Rectangle { horizontal-stretch: 1; }
                         Button {
                             text: "+ Добавить видео…";
+                            horizontal-stretch: 0;
                             clicked => { root.add_import_parts(); }
-                        }
-                        if root.imp_parts.length > 1: Button {
-                            text: "⇅ Автосортировка";
-                            clicked => { root.sort_import_parts(); }
                         }
                         if root.imp_parts.length > 0: Button {
                             text: "Очистить";
+                            horizontal-stretch: 0;
                             clicked => { root.clear_import_parts(); }
                         }
                     }

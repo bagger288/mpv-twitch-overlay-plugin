@@ -777,6 +777,9 @@ fn main() -> Result<(), slint::PlatformError> {
                     });
                 }
 
+                // Naturally sort parts so part1, part2, part10 are in proper order immediately
+                list.sort_by(|a, b| natural_sort_key(&a.name).cmp(&natural_sort_key(&b.name)));
+
                 if let Some(ui) = handle_weak.upgrade() {
                     update_import_parts_ui(&ui, &model, &list);
 
