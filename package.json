@@ -1,0 +1,11 @@
+{
+  "name": "mpv-twitch-overlay-plugin",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Native Rust desktop launcher and mpv Twitch overlay",
+  "scripts": {
+    "dev": "node dev-server.js",
+    "start": "node dev-server.js",
+    "build": "echo \"Rust project: use cargo build --release\""
+  }
+}
