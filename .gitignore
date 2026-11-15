@@ -36,4 +36,5 @@
 /assets/inter-latin-700.ttf
 
 # Local development docs
-/docs/
+/docs/*
+!/docs/HANDOVER.md
