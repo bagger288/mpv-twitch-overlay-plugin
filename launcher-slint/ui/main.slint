@@ -15,6 +15,41 @@ export struct ChannelItem {
     count: int,
 }
 
+export struct ImportPartItem {
+    name: string,
+    path: string,
+    size_str: string,
+}
+
+component IconButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> enabled: true;
+    in property <color> bg_color: #26262c;
+    in property <color> hover_color: #3b3b44;
+    in property <color> text_color: #efeff1;
+    callback clicked <=> touch.clicked;
+
+    width: 26px;
+    height: 24px;
+    border-radius: 4px;
+    background: !root.enabled ? #1d1d23 : (touch.has-hover ? root.hover_color : root.bg_color);
+    animate background { duration: 120ms; }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? pointer : default;
+    }
+
+    Text {
+        text: root.text;
+        color: !root.enabled ? #4d4d5a : root.text_color;
+        font-size: 8.5pt;
+        font-weight: 700;
+        vertical-alignment: center;
+        horizontal-alignment: center;
+    }
+}
+
 component AppInput inherits Rectangle {
     in-out property <string> text <=> input.text;
     in property <string> placeholder-text: "";
@@ -142,6 +177,12 @@ export component MainWindow inherits Window {
 
     callback run_import();
     callback browse_import_video();
+    callback add_import_parts();
+    callback remove_import_part(int);
+    callback move_import_part_up(int);
+    callback move_import_part_down(int);
+    callback sort_import_parts();
+    callback clear_import_parts();
 
     callback toggle_recording();
     callback toggle_pc_agent();
@@ -158,6 +199,8 @@ export component MainWindow inherits Window {
     in-out property <string> selected_recording_id: "";
 
     // Tab 2 Import properties
+    in property <[ImportPartItem]> imp_parts: [];
+    in property <string> imp_parts_summary: "Частей не добавлено";
     in-out property <string> imp_channel: "";
     in-out property <string> imp_video: "";
     in-out property <string> imp_time: "";
@@ -415,11 +458,157 @@ export component MainWindow inherits Window {
                 Text { text: "Канал Twitch:"; font-size: 9pt; color: root.c_text_dim; }
                 AppInput { text <=> root.imp_channel; }
 
-                Text { text: "Видео:"; font-size: 9pt; color: root.c_text_dim; }
-                HorizontalLayout {
-                    spacing: 6px;
-                    AppInput { text <=> root.imp_video; placeholder-text: "Пути к файлам video.ts / mp4 через ';'"; }
-                    Button { text: "Обзор…"; clicked => { root.browse_import_video(); } }
+                // Video parts section
+                VerticalLayout {
+                    spacing: 4px;
+
+                    HorizontalLayout {
+                        Text {
+                            text: "Файлы видео (части записи):";
+                            font-size: 9pt;
+                            color: root.c_text_dim;
+                            vertical-alignment: center;
+                        }
+                        Rectangle { } // Spacer
+                        Button {
+                            text: "+ Добавить видео…";
+                            clicked => { root.add_import_parts(); }
+                        }
+                        if root.imp_parts.length > 1: Button {
+                            text: "⇅ Автосортировка";
+                            clicked => { root.sort_import_parts(); }
+                        }
+                        if root.imp_parts.length > 0: Button {
+                            text: "✕ Очистить";
+                            clicked => { root.clear_import_parts(); }
+                        }
+                    }
+
+                    // Parts container
+                    Rectangle {
+                        background: root.c_card;
+                        border-radius: 4px;
+                        border-width: 1px;
+                        border-color: #2e2e38;
+                        clip: true;
+
+                        if root.imp_parts.length == 0: Rectangle {
+                            height: 76px;
+                            TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.add_import_parts(); }
+                            }
+                            VerticalLayout {
+                                alignment: center;
+                                spacing: 4px;
+                                Text {
+                                    text: "📁 Нажмите «+ Добавить видео…» или кликните сюда";
+                                    color: #71717a;
+                                    font-size: 9.5pt;
+                                    horizontal-alignment: center;
+                                }
+                                Text {
+                                    text: "Поддерживается выбор сразу нескольких файлов (mp4, ts, mkv)";
+                                    color: #555562;
+                                    font-size: 8pt;
+                                    horizontal-alignment: center;
+                                }
+                            }
+                        }
+
+                        if root.imp_parts.length > 0: VerticalLayout {
+                            padding: 4px;
+                            spacing: 4px;
+
+                            ScrollView {
+                                max-height: 150px;
+                                VerticalLayout {
+                                    spacing: 2px;
+                                    for part[i] in root.imp_parts: Rectangle {
+                                        height: 32px;
+                                        background: #23232b;
+                                        border-radius: 3px;
+                                        border-width: 1px;
+                                        border-color: #2d2d38;
+
+                                        HorizontalLayout {
+                                            padding-left: 8px;
+                                            padding-right: 6px;
+                                            spacing: 6px;
+
+                                            // Number
+                                            Text {
+                                                text: "\{i + 1}.";
+                                                color: root.c_accent;
+                                                font-size: 9pt;
+                                                font-weight: 700;
+                                                width: 24px;
+                                                vertical-alignment: center;
+                                            }
+
+                                            // Filename
+                                            Text {
+                                                text: part.name;
+                                                color: root.c_text;
+                                                font-size: 9pt;
+                                                overflow: elide;
+                                                horizontal-stretch: 1;
+                                                vertical-alignment: center;
+                                            }
+
+                                            // File size
+                                            Text {
+                                                text: part.size_str;
+                                                color: root.c_text_dim;
+                                                font-size: 8.5pt;
+                                                width: 65px;
+                                                horizontal-alignment: right;
+                                                vertical-alignment: center;
+                                            }
+
+                                            // Move up / move down / remove
+                                            HorizontalLayout {
+                                                spacing: 2px;
+                                                IconButton {
+                                                    text: "▲";
+                                                    enabled: i > 0;
+                                                    clicked => { root.move_import_part_up(i); }
+                                                }
+                                                IconButton {
+                                                    text: "▼";
+                                                    enabled: i < root.imp_parts.length - 1;
+                                                    clicked => { root.move_import_part_down(i); }
+                                                }
+                                                IconButton {
+                                                    text: "✕";
+                                                    text_color: #f87171;
+                                                    hover_color: #4a2428;
+                                                    clicked => { root.remove_import_part(i); }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Summary footer
+                            Rectangle {
+                                height: 22px;
+                                background: #18181d;
+                                border-radius: 2px;
+                                HorizontalLayout {
+                                    padding-left: 8px;
+                                    padding-right: 8px;
+                                    Text {
+                                        text: root.imp_parts_summary;
+                                        color: #8c8c9a;
+                                        font-size: 8pt;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
 
                 Text { text: "Старт (UTC): YYYY-MM-DD HH:MM:SS"; font-size: 9pt; color: root.c_text_dim; }
@@ -467,9 +656,9 @@ export component MainWindow inherits Window {
 
                 HorizontalLayout {
                     Button {
-                        text: "Создать сессию из архива";
+                        text: "⚡ Создать сессию из архива";
                         primary: true;
-                        enabled: !root.imp_busy;
+                        enabled: !root.imp_busy && root.imp_parts.length > 0;
                         clicked => { root.run_import(); }
                     }
                     Rectangle { }

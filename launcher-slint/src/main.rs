@@ -185,6 +185,100 @@ fn check_tool_paths(ui: &MainWindow, sl_path: &str, mpv_path: &str) {
     }
 }
 
+#[derive(Clone, Debug)]
+struct ImportPartData {
+    path: PathBuf,
+    name: String,
+    size_bytes: u64,
+    size_str: String,
+}
+
+fn format_part_size(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = 1024 * 1024;
+    const GB: u64 = 1024 * 1024 * 1024;
+
+    if bytes >= GB {
+        format!("{:.2} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.0} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
+fn update_import_parts_ui(
+    ui: &MainWindow,
+    model: &Rc<VecModel<ImportPartItem>>,
+    parts: &[ImportPartData],
+) {
+    let items: Vec<ImportPartItem> = parts
+        .iter()
+        .map(|p| ImportPartItem {
+            name: p.name.clone().into(),
+            path: p.path.to_string_lossy().to_string().into(),
+            size_str: p.size_str.clone().into(),
+        })
+        .collect();
+    model.set_vec(items);
+
+    if parts.is_empty() {
+        ui.set_imp_parts_summary("Частей не добавлено".into());
+    } else {
+        let total_bytes: u64 = parts.iter().map(|p| p.size_bytes).sum();
+        let count = parts.len();
+        let count_str = match count {
+            1 => "1 часть".to_string(),
+            2..=4 => format!("{} части", count),
+            _ => format!("{} частей", count),
+        };
+        ui.set_imp_parts_summary(
+            format!("Всего: {} ({})", count_str, format_part_size(total_bytes)).into(),
+        );
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum KeyChunk {
+    Text(String),
+    Num(u64),
+}
+
+fn natural_sort_key(s: &str) -> Vec<KeyChunk> {
+    let mut chunks = Vec::new();
+    let mut chars = s.chars().peekable();
+
+    while let Some(&c) = chars.peek() {
+        if c.is_ascii_digit() {
+            let mut num_str = String::new();
+            while let Some(&digit) = chars.peek() {
+                if digit.is_ascii_digit() {
+                    num_str.push(digit);
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            let n = num_str.parse::<u64>().unwrap_or(0);
+            chunks.push(KeyChunk::Num(n));
+        } else {
+            let mut text = String::new();
+            while let Some(&ch) = chars.peek() {
+                if !ch.is_ascii_digit() {
+                    text.push(ch.to_ascii_lowercase());
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            chunks.push(KeyChunk::Text(text));
+        }
+    }
+    chunks
+}
+
 fn main() -> Result<(), slint::PlatformError> {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "render-chat") {
@@ -255,6 +349,11 @@ fn main() -> Result<(), slint::PlatformError> {
 
     let agent_running = Arc::new(AtomicBool::new(false));
     let agent_stop_signal: Arc<Mutex<Option<Arc<AtomicBool>>>> = Arc::new(Mutex::new(None));
+
+    let import_parts: Arc<Mutex<Vec<ImportPartData>>> = Arc::new(Mutex::new(Vec::new()));
+    let import_parts_model: Rc<VecModel<ImportPartItem>> = Rc::new(VecModel::default());
+    main_window.set_imp_parts(ModelRc::from(import_parts_model.clone()));
+    main_window.set_imp_parts_summary("Частей не добавлено".into());
 
     // 1. Initialize settings from config
     {
@@ -642,32 +741,145 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
 
-    // Browse import video
+    // Import parts callbacks
     {
         let handle_weak = handle.clone();
-        main_window.on_browse_import_video(move || {
+        let parts_arc = import_parts.clone();
+        let model = import_parts_model.clone();
+        let on_add = move || {
             if let Some(files) = rfd::FileDialog::new()
                 .add_filter("Video", &["ts", "mp4", "mkv"])
                 .pick_files()
             {
-                let path_strs: Vec<String> = files
-                    .iter()
-                    .map(|p| p.to_string_lossy().to_string())
-                    .collect();
-                if let Some(ui) = handle_weak.upgrade() {
-                    ui.set_imp_video(path_strs.join(";").into());
+                let mut list = parts_arc.lock().unwrap();
+                let mut added_first_file = None;
 
-                    // Auto-fill channel (nickname) and date from the chosen file
-                    if let Some(first) = files.first() {
-                        let (ch_opt, dt_opt) = records::detect_channel_and_date(first);
-                        if let Some(ch) = ch_opt {
-                            ui.set_imp_channel(ch.into());
-                        }
-                        if let Some(dt) = dt_opt {
-                            ui.set_imp_dates(dt.format("%Y-%m-%d").to_string().into());
+                for path in files {
+                    if list.iter().any(|p| p.path == path) {
+                        continue;
+                    }
+                    let name = path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| path.to_string_lossy().to_string());
+                    let size_bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                    let size_str = format_part_size(size_bytes);
+
+                    if added_first_file.is_none() && list.is_empty() {
+                        added_first_file = Some(path.clone());
+                    }
+
+                    list.push(ImportPartData {
+                        path,
+                        name,
+                        size_bytes,
+                        size_str,
+                    });
+                }
+
+                if let Some(ui) = handle_weak.upgrade() {
+                    update_import_parts_ui(&ui, &model, &list);
+
+                    // Auto-fill channel (nickname) and date if empty
+                    if let Some(first) = added_first_file.or_else(|| list.first().map(|p| p.path.clone())) {
+                        if ui.get_imp_channel().is_empty() {
+                            let (ch_opt, dt_opt) = records::detect_channel_and_date(&first);
+                            if let Some(ch) = ch_opt {
+                                ui.set_imp_channel(ch.into());
+                            }
+                            if let Some(dt) = dt_opt {
+                                ui.set_imp_dates(dt.format("%Y-%m-%d").to_string().into());
+                            }
                         }
                     }
                 }
+            }
+        };
+
+        let on_add_browse = on_add.clone();
+        main_window.on_add_import_parts(on_add);
+        main_window.on_browse_import_video(on_add_browse);
+    }
+
+    {
+        let handle_weak = handle.clone();
+        let parts_arc = import_parts.clone();
+        let model = import_parts_model.clone();
+        main_window.on_remove_import_part(move |idx| {
+            if idx < 0 {
+                return;
+            }
+            let idx = idx as usize;
+            let mut list = parts_arc.lock().unwrap();
+            if idx < list.len() {
+                list.remove(idx);
+                if let Some(ui) = handle_weak.upgrade() {
+                    update_import_parts_ui(&ui, &model, &list);
+                }
+            }
+        });
+    }
+
+    {
+        let handle_weak = handle.clone();
+        let parts_arc = import_parts.clone();
+        let model = import_parts_model.clone();
+        main_window.on_move_import_part_up(move |idx| {
+            if idx <= 0 {
+                return;
+            }
+            let idx = idx as usize;
+            let mut list = parts_arc.lock().unwrap();
+            if idx < list.len() {
+                list.swap(idx, idx - 1);
+                if let Some(ui) = handle_weak.upgrade() {
+                    update_import_parts_ui(&ui, &model, &list);
+                }
+            }
+        });
+    }
+
+    {
+        let handle_weak = handle.clone();
+        let parts_arc = import_parts.clone();
+        let model = import_parts_model.clone();
+        main_window.on_move_import_part_down(move |idx| {
+            if idx < 0 {
+                return;
+            }
+            let idx = idx as usize;
+            let mut list = parts_arc.lock().unwrap();
+            if idx + 1 < list.len() {
+                list.swap(idx, idx + 1);
+                if let Some(ui) = handle_weak.upgrade() {
+                    update_import_parts_ui(&ui, &model, &list);
+                }
+            }
+        });
+    }
+
+    {
+        let handle_weak = handle.clone();
+        let parts_arc = import_parts.clone();
+        let model = import_parts_model.clone();
+        main_window.on_sort_import_parts(move || {
+            let mut list = parts_arc.lock().unwrap();
+            list.sort_by(|a, b| natural_sort_key(&a.name).cmp(&natural_sort_key(&b.name)));
+            if let Some(ui) = handle_weak.upgrade() {
+                update_import_parts_ui(&ui, &model, &list);
+            }
+        });
+    }
+
+    {
+        let handle_weak = handle.clone();
+        let parts_arc = import_parts.clone();
+        let model = import_parts_model.clone();
+        main_window.on_clear_import_parts(move || {
+            let mut list = parts_arc.lock().unwrap();
+            list.clear();
+            if let Some(ui) = handle_weak.upgrade() {
+                update_import_parts_ui(&ui, &model, &list);
             }
         });
     }
@@ -845,12 +1057,12 @@ fn main() -> Result<(), slint::PlatformError> {
         let root = root_dir.clone();
         let cfg_arc = config_arc.clone();
         let refresh_fn = refresh_ui_records.clone();
+        let parts_arc = import_parts.clone();
 
         main_window.on_run_import(move || {
-            let (mut ch, video_str, dates_str, time_str, auto_detect) = if let Some(ui) = handle_weak.upgrade() {
+            let (mut ch, dates_str, time_str, auto_detect) = if let Some(ui) = handle_weak.upgrade() {
                 (
                     ui.get_imp_channel().to_string(),
-                    ui.get_imp_video().to_string(),
                     ui.get_imp_dates().to_string(),
                     ui.get_imp_time().to_string(),
                     ui.get_imp_auto_detect(),
@@ -859,11 +1071,17 @@ fn main() -> Result<(), slint::PlatformError> {
                 return;
             };
 
-            let video_paths: Vec<PathBuf> = video_str
-                .split(';')
-                .filter(|s| !s.trim().is_empty())
-                .map(|s| PathBuf::from(s.trim()))
-                .collect();
+            let video_paths: Vec<PathBuf> = {
+                let list = parts_arc.lock().unwrap();
+                list.iter().map(|p| p.path.clone()).collect()
+            };
+
+            if video_paths.is_empty() {
+                if let Some(ui) = handle_weak.upgrade() {
+                    ui.set_imp_console_text("Ошибка: добавьте хотя бы один видеофайл в список\n".into());
+                }
+                return;
+            }
 
             if ch.is_empty() {
                 if let Some(first) = video_paths.first() {
@@ -879,7 +1097,7 @@ fn main() -> Result<(), slint::PlatformError> {
 
             if ch.is_empty() {
                 if let Some(ui) = handle_weak.upgrade() {
-                    ui.set_imp_console_text("Ошибка: укажите имя канала\n".into());
+                    ui.set_imp_console_text("Ошибка: укажите имя канала Twitch\n".into());
                 }
                 return;
             }
@@ -915,7 +1133,7 @@ fn main() -> Result<(), slint::PlatformError> {
 
             if let Some(ui) = handle_weak.upgrade() {
                 ui.set_imp_busy(true);
-                ui.set_imp_console_text(format!("Запуск импорта чата для канала {}...\n", ch).into());
+                ui.set_imp_console_text(format!("Запуск импорта чата для канала {} (частей: {})...\n", ch, video_paths.len()).into());
             }
 
             let h = handle_weak.clone();
@@ -923,6 +1141,7 @@ fn main() -> Result<(), slint::PlatformError> {
             let root_thread = root.clone();
             let cfg_arc_thread = cfg_arc.clone();
             let ch_for_thread = ch.clone();
+            let parts_arc_done = parts_arc.clone();
 
             std::thread::spawn(move || {
                 let rt = tokio::runtime::Builder::new_current_thread()
@@ -966,6 +1185,15 @@ fn main() -> Result<(), slint::PlatformError> {
                                 let mut cur = ui.get_imp_console_text().to_string();
                                 cur.push_str(&format!("Готово! Создана сессия: {}\n", session_path.display()));
                                 ui.set_imp_console_text(cur.into());
+
+                                // Clear import parts on success
+                                {
+                                    let mut list = parts_arc_done.lock().unwrap();
+                                    list.clear();
+                                    let empty_model = Rc::new(VecModel::<ImportPartItem>::default());
+                                    ui.set_imp_parts(ModelRc::from(empty_model));
+                                    ui.set_imp_parts_summary("Частей не добавлено".into());
+                                }
 
                                 // Ensure emotes
                                 let h2 = h.clone();
@@ -1201,13 +1429,53 @@ fn main() -> Result<(), slint::PlatformError> {
 
 
 #[cfg(test)]
-mod close_dialog_test {
+mod tests {
     use super::*;
+    use slint::Model;
 
     #[test]
-    fn test_close_dialog_properties() {
+    fn test_launcher_window_properties() {
         let win = MainWindow::new().unwrap();
         win.set_show_close_dialog(true);
         assert!(win.get_show_close_dialog());
+
+        let model = Rc::new(VecModel::<ImportPartItem>::default());
+        model.push(ImportPartItem {
+            name: "video_01.ts".into(),
+            path: "C:/test/video_01.ts".into(),
+            size_str: "1.2 GB".into(),
+        });
+        win.set_imp_parts(ModelRc::from(model));
+        assert_eq!(win.get_imp_parts().row_count(), 1);
+    }
+
+    #[test]
+    fn test_natural_sort_ordering() {
+        let mut names = vec![
+            "stream_part10.ts",
+            "stream_part1.ts",
+            "stream_part2.ts",
+            "stream_part20.ts",
+            "stream_part3.ts",
+        ];
+        names.sort_by(|a, b| natural_sort_key(a).cmp(&natural_sort_key(b)));
+        assert_eq!(
+            names,
+            vec![
+                "stream_part1.ts",
+                "stream_part2.ts",
+                "stream_part3.ts",
+                "stream_part10.ts",
+                "stream_part20.ts",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_format_part_size() {
+        assert_eq!(format_part_size(500), "500 B");
+        assert_eq!(format_part_size(1024), "1 KB");
+        assert_eq!(format_part_size(10 * 1024 * 1024), "10.0 MB");
+        assert_eq!(format_part_size(1536 * 1024 * 1024), "1.50 GB");
     }
 }
